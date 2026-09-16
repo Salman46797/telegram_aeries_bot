@@ -149,10 +149,16 @@ def home():
 # =========================
 # اجرای برنامه
 # =========================
-
 if __name__ == "__main__":
-
     port = int(os.environ.get("PORT", 10000))
+
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if BOT_TOKEN and render_url:
+        requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+            params={"url": f"{render_url}/webhook"}
+        )
 
     app.run(
         host="0.0.0.0",
