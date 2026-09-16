@@ -1,7 +1,6 @@
 import os
 import json
-import time
-import threading
+import re
 import requests
 from flask import Flask, request
 
@@ -11,10 +10,11 @@ ADMIN_ID = 5648301086
 CHANNEL_ID = "@altiustuistsnbol"
 CHANNEL_URL = "https://t.me/altiustuistsnbol"
 
+BOT_USERNAME = "Seryyaltorki_bot"
+
 EPISODES_FILE = "episodes.json"
 SPONSORS_FILE = "sponsors.json"
-
-BOT_USERNAME = "Seryyaltorki_bot"
+PENDING_FILE = "pending.json"
 
 app = Flask(__name__)
 
@@ -32,24 +32,41 @@ def telegram(method, data):
             data=data,
             timeout=20
         ).json()
+
     except Exception as e:
         print("Telegram error:", e)
         return {}
 
 
+# =========================
+# ارسال پیام
+# =========================
+
 def send_message(chat_id, text, reply_markup=None):
+
     data = {
         "chat_id": chat_id,
         "text": text
     }
 
     if reply_markup:
-        data["reply_markup"] = json.dumps(reply_markup)
+        data["reply_markup"] = json.dumps(
+            reply_markup,
+            ensure_ascii=False
+        )
 
-    return telegram("sendMessage", data)
+    return telegram(
+        "sendMessage",
+        data
+    )
 
+
+# =========================
+# حذف پیام
+# =========================
 
 def delete_message(chat_id, message_id):
+
     return telegram(
         "deleteMessage",
         {
@@ -64,18 +81,33 @@ def delete_message(chat_id, message_id):
 # =========================
 
 def load_json(filename, default):
+
     if not os.path.exists(filename):
         return default
 
     try:
-        with open(filename, "r", encoding="utf-8") as f:
+
+        with open(
+            filename,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             return json.load(f)
+
     except Exception:
+
         return default
 
 
 def save_json(filename, data):
-    with open(filename, "w", encoding="utf-8") as f:
+
+    with open(
+        filename,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             data,
             f,
@@ -84,7 +116,12 @@ def save_json(filename, data):
         )
 
 
+# =========================
+# Episodes
+# =========================
+
 def load_episodes():
+
     return load_json(
         EPISODES_FILE,
         {}
@@ -92,13 +129,19 @@ def load_episodes():
 
 
 def save_episodes(data):
+
     save_json(
         EPISODES_FILE,
         data
     )
 
 
+# =========================
+# Sponsors
+# =========================
+
 def load_sponsors():
+
     return load_json(
         SPONSORS_FILE,
         []
@@ -106,6 +149,7 @@ def load_sponsors():
 
 
 def save_sponsors(data):
+
     save_json(
         SPONSORS_FILE,
         data
@@ -113,7 +157,7 @@ def save_sponsors(data):
 
 
 # =========================
-# بررسی عضویت
+# عضویت در کانال
 # =========================
 
 def is_member(user_id, channel_id):
@@ -138,6 +182,10 @@ def is_member(user_id, channel_id):
     ]
 
 
+# =========================
+# همه اسپانسرها
+# =========================
+
 def check_all_sponsors(user_id):
 
     sponsors = load_sponsors()
@@ -148,13 +196,14 @@ def check_all_sponsors(user_id):
             user_id,
             sponsor["chat_id"]
         ):
+
             return False
 
     return True
 
 
 # =========================
-# دکمه‌های عضویت
+# دکمه عضویت
 # =========================
 
 def membership_keyboard():
@@ -163,6 +212,15 @@ def membership_keyboard():
 
     buttons = []
 
+    # کانال اصلی
+    buttons.append([
+        {
+            "text": "📢 عضویت در کانال",
+            "url": CHANNEL_URL
+        }
+    ])
+
+    # اسپانسرها
     for sponsor in sponsors:
 
         buttons.append([
@@ -185,7 +243,7 @@ def membership_keyboard():
 
 
 # =========================
-# دکمه ری‌اکشن
+# مرحله ری‌اکشن
 # =========================
 
 def reaction_keyboard():
@@ -216,7 +274,7 @@ def send_reaction_message(
     text = (
         "برای دریافت فایل موردنظرت، "
         "۵ پست آخر این کانال رو ری‌اکشن ❤️ بزن 👇\n\n"
-        + CHANNEL_URL
+        f"{CHANNEL_URL}"
     )
 
     return send_message(
@@ -224,6 +282,33 @@ def send_reaction_message(
         text,
         reaction_keyboard()
     )
+
+
+# =========================
+# استخراج شماره قسمت از کپشن
+# =========================
+
+def extract_episode_number(caption):
+
+    if not caption:
+        return None
+
+    pattern = (
+        r"(?:قسمت|episode)"
+        r"\s*[:：]?\s*"
+        r"(\d+)"
+    )
+
+    match = re.search(
+        pattern,
+        caption,
+        re.IGNORECASE
+    )
+
+    if match:
+        return match.group(1)
+
+    return None
 
 
 # =========================
@@ -252,142 +337,43 @@ def send_episode(
 
     episode = episodes[key]
 
-    sent_messages = []
+    caption = episode.get(
+        "caption",
+        ""
+    )
 
-    # نسخه جدید چند کیفیت
-    if isinstance(
-        episode,
-        list
-    ):
+    file_id = episode["file_id"]
+    file_type = episode["type"]
 
-        for video in episode:
+    # -------------------------
+    # Document
+    # -------------------------
 
-            result = None
+    if file_type == "document":
 
-            if video["type"] == "document":
-
-                result = telegram(
-                    "sendDocument",
-                    {
-                        "chat_id": chat_id,
-                        "document": video["file_id"],
-                        "caption": video.get(
-                            "caption",
-                            ""
-                        )
-                    }
-                )
-
-            elif video["type"] == "video":
-
-                result = telegram(
-                    "sendVideo",
-                    {
-                        "chat_id": chat_id,
-                        "video": video["file_id"],
-                        "caption": video.get(
-                            "caption",
-                            ""
-                        )
-                    }
-                )
-
-            if (
-                result
-                and result.get("ok")
-            ):
-
-                sent_messages.append(
-                    result["result"]["message_id"]
-                )
-
-    # نسخه قدیمی تک فایل
-    else:
-
-        result = None
-
-        if episode["type"] == "document":
-
-            result = telegram(
-                "sendDocument",
-                {
-                    "chat_id": chat_id,
-                    "document": episode["file_id"],
-                    "caption": episode.get(
-                        "caption",
-                        ""
-                    )
-                }
-            )
-
-        elif episode["type"] == "video":
-
-            result = telegram(
-                "sendVideo",
-                {
-                    "chat_id": chat_id,
-                    "video": episode["file_id"],
-                    "caption": episode.get(
-                        "caption",
-                        ""
-                    )
-                }
-            )
-
-        if (
-            result
-            and result.get("ok")
-        ):
-
-            sent_messages.append(
-                result["result"]["message_id"]
-            )
-
-
-    # حذف بعد از ۳۰ ثانیه
-    if sent_messages:
-
-        threading.Thread(
-            target=delete_after_30,
-            args=(
-                chat_id,
-                sent_messages,
-                episode_number
-            ),
-            daemon=True
-        ).start()
-
-
-def delete_after_30(
-    chat_id,
-    message_ids,
-    episode_number
-):
-
-    time.sleep(30)
-
-    for message_id in message_ids:
-
-        delete_message(
-            chat_id,
-            message_id
+        telegram(
+            "sendDocument",
+            {
+                "chat_id": chat_id,
+                "document": file_id,
+                "caption": caption
+            }
         )
 
-    link = (
-        f"https://t.me/"
-        f"{BOT_USERNAME}"
-        f"?start=ep_"
-        f"{episode_number}"
-    )
+    # -------------------------
+    # Video
+    # -------------------------
 
-    send_message(
-        chat_id,
-        "⏰ زمان دانلود تمام شد.\n\n"
-        "🔗 برای دانلود مجدد قسمت "
-        + str(episode_number)
-        + " روی لینک زیر بزن:\n\n"
-        + link
-    )
+    elif file_type == "video":
+
+        telegram(
+            "sendVideo",
+            {
+                "chat_id": chat_id,
+                "video": file_id,
+                "caption": caption
+            }
+        )
 
 
 # =========================
@@ -406,9 +392,9 @@ def webhook():
         return "OK"
 
 
-    # =========================
-    # Callback
-    # =========================
+    # ==================================================
+    # CALLBACK QUERY
+    # ==================================================
 
     if "callback_query" in update:
 
@@ -432,24 +418,35 @@ def webhook():
             "data"
         )
 
+
+        # جواب دادن به دکمه
         telegram(
             "answerCallbackQuery",
             {
                 "callback_query_id":
-                    callback["id"]
+                callback["id"]
             }
         )
 
 
-        # -------------------------
-        # بررسی عضویت
-        # -------------------------
+        # ==================================================
+        # عضو شدم
+        # ==================================================
 
         if data == "check_join":
 
-            if check_all_sponsors(
+            # کانال اصلی
+            main_member = is_member(
+                user_id,
+                CHANNEL_ID
+            )
+
+            # اسپانسرها
+            sponsors_member = check_all_sponsors(
                 user_id
-            ):
+            )
+
+            if main_member and sponsors_member:
 
                 delete_message(
                     chat_id,
@@ -457,7 +454,7 @@ def webhook():
                 )
 
                 pending = load_json(
-                    "pending.json",
+                    PENDING_FILE,
                     {}
                 )
 
@@ -483,22 +480,21 @@ def webhook():
 
                 send_message(
                     chat_id,
-                    "❌ هنوز عضو همه کانال‌های اسپانسر نشدی.\n"
-                    "اول عضو همه کانال‌ها شو و دوباره "
-                    "«عضو شدم ✅» رو بزن."
+                    "❌ هنوز در همه کانال‌های لازم عضو نشدی.\n\n"
+                    "اول عضو شو و دوباره «عضو شدم ✅» رو بزن."
                 )
 
             return "OK"
 
 
-        # -------------------------
-        # ری‌اکشن
-        # -------------------------
+        # ==================================================
+        # انجام شد
+        # ==================================================
 
         if data == "reaction_done":
 
             pending = load_json(
-                "pending.json",
+                PENDING_FILE,
                 {}
             )
 
@@ -531,9 +527,9 @@ def webhook():
         return "OK"
 
 
-    # =========================
-    # Message
-    # =========================
+    # ==================================================
+    # MESSAGE
+    # ==================================================
 
     if "message" not in update:
         return "OK"
@@ -551,24 +547,18 @@ def webhook():
     ]["id"]
 
 
-    # =========================
-    # آپلود ویدیو توسط ادمین
-    # =========================
+    # ==================================================
+    # آپلود فایل توسط ادمین
+    # ==================================================
 
     if user_id == ADMIN_ID:
 
         file_id = None
         file_type = None
 
-        if "video" in message:
 
-            file_id = message[
-                "video"
-            ]["file_id"]
-
-            file_type = "video"
-
-        elif "document" in message:
+        # Document
+        if "document" in message:
 
             file_id = message[
                 "document"
@@ -577,34 +567,30 @@ def webhook():
             file_type = "document"
 
 
+        # Video
+        elif "video" in message:
+
+            file_id = message[
+                "video"
+            ]["file_id"]
+
+            file_type = "video"
+
+
         if file_id:
 
+            # کپشن اصلی را بدون lower کردن نگه می‌داریم
             caption = message.get(
                 "caption",
                 ""
             ).strip()
 
-            # مثال:
-            # episode 15
-            # quality 720
 
-            lines = caption.splitlines()
+            # پیدا کردن شماره قسمت
+            episode_number = extract_episode_number(
+                caption
+            )
 
-            episode_number = None
-
-            for line in lines:
-
-                if line.lower().startswith(
-                    "episode "
-                ):
-
-                    number = line[
-                        8:
-                    ].strip()
-
-                    if number.isdigit():
-
-                        episode_number = number
 
             if episode_number:
 
@@ -615,60 +601,49 @@ def webhook():
                     + episode_number
                 )
 
-                if key not in episodes:
-                    episodes[key] = []
 
+                # ذخیره فایل + کپشن
+                episodes[key] = {
 
-                # ذخیره کپشن کامل
-                # همان چیزی که خودت نوشتی
+                    "file_id": file_id,
 
-                episodes[key].append(
-                    {
-                        "file_id":
-                            file_id,
+                    "type": file_type,
 
-                        "type":
-                            file_type,
+                    "caption": caption
+                }
 
-                        "caption":
-                            caption
-                    }
-                )
 
                 save_episodes(
                     episodes
                 )
 
+
+                # لینک قسمت
                 link = (
-                    f"https://t.me/"
-                    f"{BOT_USERNAME}"
-                    f"?start=ep_"
-                    f"{episode_number}"
+                    "https://t.me/"
+                    + BOT_USERNAME
+                    + "?start=ep_"
+                    + episode_number
                 )
 
-                count = len(
-                    episodes[key]
-                )
 
                 send_message(
                     chat_id,
-                    "✅ ویدیو ذخیره شد.\n\n"
-                    "📺 قسمت: "
+
+                    "✅ قسمت "
                     + episode_number
-                    + "\n"
-                    "🎬 تعداد فایل‌ها: "
-                    + str(count)
-                    + "\n\n"
-                    "🔗 لینک قسمت:\n"
+                    + " ذخیره شد.\n\n"
+                    "🔗 لینک دانلود:\n"
                     + link
                 )
+
 
                 return "OK"
 
 
-    # =========================
-    # Text
-    # =========================
+    # ==================================================
+    # TEXT
+    # ==================================================
 
     text = message.get(
         "text",
@@ -676,9 +651,9 @@ def webhook():
     )
 
 
-    # =========================
+    # ==================================================
     # START
-    # =========================
+    # ==================================================
 
     if text.startswith(
         "/start"
@@ -690,16 +665,28 @@ def webhook():
 
             parameter = parts[1]
 
+
             if parameter.startswith(
                 "ep_"
             ):
 
-                episode_number = (
-                    parameter.replace(
-                        "ep_",
-                        ""
-                    )
+                episode_number = parameter.replace(
+                    "ep_",
+                    "",
+                    1
                 )
+
+
+                # فقط عدد قبول شود
+                if not episode_number.isdigit():
+
+                    send_message(
+                        chat_id,
+                        "❌ لینک قسمت نامعتبر است."
+                    )
+
+                    return "OK"
+
 
                 episodes = load_episodes()
 
@@ -707,6 +694,7 @@ def webhook():
                     "ep_"
                     + episode_number
                 )
+
 
                 if key not in episodes:
 
@@ -719,9 +707,8 @@ def webhook():
 
 
                 # ذخیره قسمت در انتظار
-
                 pending = load_json(
-                    "pending.json",
+                    PENDING_FILE,
                     {}
                 )
 
@@ -730,29 +717,47 @@ def webhook():
                 ] = episode_number
 
                 save_json(
-                    "pending.json",
+                    PENDING_FILE,
                     pending
                 )
 
 
-                # اسپانسرها
-
-                if not check_all_sponsors(
-                    user_id
+                # بررسی عضویت
+                if not is_member(
+                    user_id,
+                    CHANNEL_ID
                 ):
 
                     send_message(
                         chat_id,
+
                         "🔒 برای دریافت فایل ابتدا "
-                        "باید عضو کانال‌های زیر بشی:",
+                        "باید عضو کانال بشی.",
+
                         membership_keyboard()
                     )
 
                     return "OK"
 
 
-                # مرحله ری‌اکشن
+                # بررسی اسپانسرها
+                if not check_all_sponsors(
+                    user_id
+                ):
 
+                    send_message(
+                        chat_id,
+
+                        "🔒 برای دریافت فایل باید "
+                        "در کانال‌های لازم هم عضو بشی.",
+
+                        membership_keyboard()
+                    )
+
+                    return "OK"
+
+
+                # عضو است → مرحله ری‌اکشن
                 send_reaction_message(
                     chat_id,
                     episode_number
@@ -763,6 +768,7 @@ def webhook():
 
         send_message(
             chat_id,
+
             "سلام 👋\n"
             "لینک قسمت موردنظرت رو باز کن."
         )
@@ -770,78 +776,108 @@ def webhook():
         return "OK"
 
 
-    # =========================
-    # مدیریت اسپانسر
-    # =========================
+    # ==================================================
+    # مدیریت اسپانسرها
+    # ==================================================
 
     if user_id == ADMIN_ID:
 
 
-        # -------------------------
-        # اضافه کردن اسپانسر
-        # -------------------------
+        # ==================================================
+        # ADD SPONSOR
+        # ==================================================
 
         if text.startswith(
             "/add_sponsor"
         ):
 
             parts = text.split(
-                maxsplit=3
+                maxsplit=2
             )
 
-            if len(parts) < 4:
+
+            if len(parts) < 3:
 
                 send_message(
                     chat_id,
-                    "فرمت:\n\n"
-                    "/add_sponsor "
-                    "@channel "
-                    "نام کانال "
-                    "https://t.me/channel"
+
+                    "فرمت درست:\n\n"
+                    "/add_sponsor @channel "
+                    "https://t.me/channel | نام کانال"
                 )
 
                 return "OK"
 
 
             channel_id = parts[1]
-            title = parts[2]
-            url = parts[3]
+
+            remaining = parts[2]
+
+
+            if "|" not in remaining:
+
+                send_message(
+                    chat_id,
+
+                    "فرمت درست:\n\n"
+                    "/add_sponsor @channel "
+                    "https://t.me/channel | نام کانال"
+                )
+
+                return "OK"
+
+
+            url, title = remaining.split(
+                "|",
+                1
+            )
+
+
+            url = url.strip()
+            title = title.strip()
+
+
+            if not title:
+
+                title = channel_id
 
 
             sponsors = load_sponsors()
 
+
             sponsors.append(
                 {
-                    "chat_id":
-                        channel_id,
-
-                    "title":
-                        title,
-
-                    "url":
-                        url
+                    "chat_id": channel_id,
+                    "title": title,
+                    "url": url
                 }
             )
+
 
             save_sponsors(
                 sponsors
             )
 
+
             send_message(
                 chat_id,
-                "✅ اسپانسر اضافه شد."
+
+                "✅ اسپانسر اضافه شد.\n\n"
+                "📢 "
+                + title
             )
 
             return "OK"
 
 
-        # -------------------------
-        # نمایش اسپانسرها
-        # -------------------------
+        # ==================================================
+        # SPONSORS
+        # ==================================================
 
         if text == "/sponsors":
 
             sponsors = load_sponsors()
+
 
             if not sponsors:
 
@@ -857,6 +893,7 @@ def webhook():
                 "📢 اسپانسرهای فعال:\n\n"
             )
 
+
             for i, sponsor in enumerate(
                 sponsors,
                 1
@@ -867,7 +904,10 @@ def webhook():
                     + ". "
                     + sponsor["title"]
                     + "\n"
+                    + sponsor["chat_id"]
+                    + "\n\n"
                 )
+
 
             send_message(
                 chat_id,
@@ -877,15 +917,16 @@ def webhook():
             return "OK"
 
 
-        # -------------------------
-        # حذف اسپانسر
-        # -------------------------
+        # ==================================================
+        # REMOVE SPONSOR
+        # ==================================================
 
         if text.startswith(
             "/remove_sponsor"
         ):
 
             parts = text.split()
+
 
             if (
                 len(parts) < 2
@@ -894,6 +935,7 @@ def webhook():
 
                 send_message(
                     chat_id,
+
                     "مثال:\n"
                     "/remove_sponsor 2"
                 )
@@ -901,35 +943,40 @@ def webhook():
                 return "OK"
 
 
-            index = int(
-                parts[1]
-            ) - 1
+            index = (
+                int(parts[1])
+                - 1
+            )
+
 
             sponsors = load_sponsors()
 
 
-            if 0 <= index < len(
-                sponsors
-            ):
+            if 0 <= index < len(sponsors):
 
-                sponsors.pop(
+                removed = sponsors.pop(
                     index
                 )
+
 
                 save_sponsors(
                     sponsors
                 )
 
+
                 send_message(
                     chat_id,
-                    "✅ اسپانسر حذف شد."
+
+                    "✅ اسپانسر حذف شد:\n"
+                    + removed["title"]
                 )
 
             else:
 
                 send_message(
                     chat_id,
-                    "❌ شماره اشتباه است."
+
+                    "❌ شماره اسپانسر اشتباه است."
                 )
 
             return "OK"
@@ -938,15 +985,19 @@ def webhook():
     return "OK"
 
 
+# ==================================================
+# HOME
+# ==================================================
+
 @app.route("/")
 def home():
 
     return "Bot is running."
 
 
-# =========================
-# Run
-# =========================
+# ==================================================
+# RUN
+# ==================================================
 
 if __name__ == "__main__":
 
@@ -984,11 +1035,14 @@ if __name__ == "__main__":
 
 
     result = requests.post(
+
         f"https://api.telegram.org/bot"
         f"{BOT_TOKEN}/setWebhook",
+
         data={
             "url": webhook_url
         },
+
         timeout=20
     )
 
