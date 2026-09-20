@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import random
+import string
 import threading
 import requests
 
@@ -22,6 +24,8 @@ CHANNEL_URL = "https://t.me/altiustuistsnbol"
 
 DELETE_AFTER = 30
 
+BOT_USERNAME = "Seryyaltorki_bot"
+
 app = Flask(__name__)
 
 TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -37,17 +41,17 @@ def tg(method, data=None):
 
         r = requests.post(
             f"{TG_URL}/{method}",
-            json=data or {},
-            timeout=30
+            data=data or {},
+            timeout=20
         )
 
         return r.json()
 
     except Exception as e:
 
-        print("Telegram Error:", e)
+        print("TG ERROR:", e)
 
-        return {}
+        return None
 
 
 def send_message(chat_id, text, reply_markup=None):
@@ -77,51 +81,97 @@ def delete_message(chat_id, message_id):
     )
 
 
+def answer_callback(callback_id):
+
+    return tg(
+        "answerCallbackQuery",
+        {
+            "callback_query_id": callback_id
+        }
+    )
+
+
 # ==================================================
 # SUPABASE
 # ==================================================
 
-SB_HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
-}
-
-
-def sb_request(method, table, data=None, params=None):
+def sb_request(
+    method,
+    table,
+    params=None,
+    json_data=None,
+    headers_extra=None
+):
 
     try:
 
-        url = f"{SUPABASE_URL}/rest/v1/{table}"
+        headers = {
+
+            "apikey": SUPABASE_KEY,
+
+            "Authorization":
+                f"Bearer {SUPABASE_KEY}",
+
+            "Content-Type":
+                "application/json"
+
+        }
+
+        if headers_extra:
+
+            headers.update(
+                headers_extra
+            )
+
+        url = (
+            f"{SUPABASE_URL.rstrip('/')}"
+            f"/rest/v1/{table}"
+        )
 
         r = requests.request(
+
             method,
+
             url,
-            headers=SB_HEADERS,
-            json=data,
+
+            headers=headers,
+
             params=params,
-            timeout=30
+
+            json=json_data,
+
+            timeout=20
+
+        )
+
+        print(
+            "SUPABASE:",
+            method,
+            table,
+            r.status_code,
+            r.text[:500]
         )
 
         if r.status_code >= 400:
 
-            print(
-                "SUPABASE ERROR:",
-                r.status_code,
-                r.text
-            )
-
             return None
 
         if not r.text:
+
             return True
 
-        return r.json()
+        try:
+
+            return r.json()
+
+        except:
+
+            return True
 
     except Exception as e:
 
         print(
-            "Supabase Exception:",
+            "SUPABASE ERROR:",
             e
         )
 
@@ -129,31 +179,24 @@ def sb_request(method, table, data=None, params=None):
 
 
 # ==================================================
-# NORMALIZE TEXT
+# TEXT
 # ==================================================
 
 def normalize_text(text):
 
     if not text:
+
         return ""
 
-    text = str(text)
+    text = text.replace(
+        "ي",
+        "ی"
+    )
 
-    replacements = {
-        "ي": "ی",
-        "ى": "ی",
-        "ك": "ک",
-        "ۀ": "ه",
-        "ة": "ه",
-        "‌": " "
-    }
-
-    for old, new in replacements.items():
-
-        text = text.replace(
-            old,
-            new
-        )
+    text = text.replace(
+        "ك",
+        "ک"
+    )
 
     text = re.sub(
         r"\s+",
@@ -165,17 +208,54 @@ def normalize_text(text):
 
 
 # ==================================================
-# PARSE EPISODE CAPTION
+# RANDOM START CODE
+# ==================================================
+
+def generate_start_code():
+
+    chars = (
+        string.ascii_lowercase +
+        string.digits
+    )
+
+    while True:
+
+        code = "".join(
+            random.choices(
+                chars,
+                k=6
+            )
+        )
+
+        result = sb_request(
+
+            "GET",
+
+            "episodes",
+
+            params={
+                "select": "id",
+                "start_code":
+                    f"eq.{code}",
+                "limit": "1"
+            }
+
+        )
+
+        if result == []:
+
+            return code
+
+
+# ==================================================
+# PARSE CAPTION
 # ==================================================
 
 def parse_episode_caption(caption):
 
-    if not caption:
-        return None
+    caption = caption or ""
 
-    original = caption
-
-    text = normalize_text(
+    normalized = normalize_text(
         caption
     )
 
@@ -187,34 +267,51 @@ def parse_episode_caption(caption):
 
     patterns = [
 
-        r"سریال\s*[:：]\s*[«\"“](.*?)[»\"”]",
+        r"سریال\s*[:：]?\s*[«\"“](.*?)[»\"”]",
 
-        r"سریال\s*[:：]\s*(.+?)(?:\n|قسمت)",
+        r"سریال\s*[:：]\s*(.+)",
 
-        r"سریال\s*[«\"“](.*?)[»\"”]",
-
-        r"سریال\s+(.+?)(?:\n|قسمت)"
+        r"سریال\s+(.+)"
 
     ]
 
     for pattern in patterns:
 
-        m = re.search(
+        match = re.search(
             pattern,
-            text,
+            normalized,
             re.IGNORECASE
         )
 
-        if m:
+        if match:
 
-            series_name = m.group(1).strip()
+            series_name = match.group(1).strip()
 
             break
 
     if not series_name:
 
-        return None
+        lines = normalized.splitlines()
 
+        for line in lines:
+
+            line = line.strip()
+
+            if line.startswith("سریال"):
+
+                series_name = re.sub(
+                    r"^سریال\s*[:：]?\s*",
+                    "",
+                    line
+                ).strip()
+
+                series_name = (
+                    series_name
+                    .strip("«»\"“”")
+                    .strip()
+                )
+
+                break
 
     # ----------------------------------------------
     # EPISODE NUMBER
@@ -222,36 +319,31 @@ def parse_episode_caption(caption):
 
     episode_number = None
 
-    episode_patterns = [
+    patterns = [
 
-        r"قسمت\s*[:：\-]?\s*(\d+)",
+        r"قسمت\s*[:：]?\s*(\d+)",
 
-        r"episode\s*[:：\-]?\s*(\d+)",
+        r"episode\s*[:：]?\s*(\d+)",
 
-        r"اپیزود\s*[:：\-]?\s*(\d+)"
+        r"اپیزود\s*[:：]?\s*(\d+)"
 
     ]
 
-    for pattern in episode_patterns:
+    for pattern in patterns:
 
-        m = re.search(
+        match = re.search(
             pattern,
-            text,
+            normalized,
             re.IGNORECASE
         )
 
-        if m:
+        if match:
 
             episode_number = int(
-                m.group(1)
+                match.group(1)
             )
 
             break
-
-    if episode_number is None:
-
-        return None
-
 
     # ----------------------------------------------
     # FILE TYPE
@@ -259,54 +351,102 @@ def parse_episode_caption(caption):
 
     file_type = "نامشخص"
 
-    if "زیرنویس مووی باز" in text:
+    if "زیرنویس مووی باز" in normalized:
 
         file_type = "زیرنویس مووی باز"
 
-    elif "زیرنویس فوری" in text:
+    elif "زیرنویس فوری" in normalized:
 
         file_type = "زیرنویس فوری"
 
-    elif "زبان اصلی" in text:
+    elif "زبان اصلی" in normalized:
 
         file_type = "زبان اصلی"
 
-
     return {
 
-        "series_name": series_name,
+        "series_name":
+            series_name,
 
-        "episode_number": episode_number,
+        "episode_number":
+            episode_number,
 
-        "file_type": file_type,
-
-        "original_caption": original
+        "file_type":
+            file_type
 
     }
 
 
 # ==================================================
-# EPISODE KEY
+# EPISODE
 # ==================================================
 
-def make_episode_key(
+def get_episode_by_code(
+    start_code
+):
+
+    result = sb_request(
+
+        "GET",
+
+        "episodes",
+
+        params={
+
+            "select":
+                "*",
+
+            "start_code":
+                f"eq.{start_code}",
+
+            "limit":
+                "1"
+
+        }
+
+    )
+
+    if not result:
+
+        return None
+
+    return result[0]
+
+
+def get_episode(
     series_name,
     episode_number
 ):
 
-    safe_name = normalize_text(
-        series_name
-    ).lower()
+    result = sb_request(
 
-    safe_name = re.sub(
-        r"\s+",
-        " ",
-        safe_name
-    ).strip()
+        "GET",
 
-    return (
-        f"{safe_name}__{episode_number}"
+        "episodes",
+
+        params={
+
+            "select":
+                "*",
+
+            "series_name":
+                f"eq.{series_name}",
+
+            "episode_number":
+                f"eq.{episode_number}",
+
+            "limit":
+                "1"
+
+        }
+
     )
+
+    if not result:
+
+        return None
+
+    return result[0]
 
 
 # ==================================================
@@ -319,36 +459,18 @@ def save_episode(
     file_data
 ):
 
-    episode_key = make_episode_key(
+    existing = get_episode(
         series_name,
         episode_number
     )
-
-    existing = sb_request(
-        "GET",
-        "episodes",
-        params={
-            "episode_key":
-                f"eq.{episode_key}",
-
-            "select": "*"
-        }
-    )
-
-    if existing is None:
-
-        return False, None
-
 
     # ----------------------------------------------
     # EXISTING EPISODE
     # ----------------------------------------------
 
-    if len(existing) > 0:
+    if existing:
 
-        episode = existing[0]
-
-        files = episode.get(
+        files = existing.get(
             "files"
         ) or []
 
@@ -357,135 +479,98 @@ def save_episode(
         )
 
         result = sb_request(
+
             "PATCH",
+
             "episodes",
-            data={
-                "files": files,
 
-                "series_name":
-                    series_name,
-
-                "episode_number":
-                    episode_number
-            },
             params={
-                "episode_key":
-                    f"eq.{episode_key}"
+
+                "id":
+                    f"eq.{existing['id']}"
+
+            },
+
+            json_data={
+
+                "files":
+                    files
+
+            },
+
+            headers_extra={
+
+                "Prefer":
+                    "return=representation"
+
             }
+
         )
 
         if result is None:
 
             return False, None
 
-        return True, episode_key
-
+        return (
+            True,
+            existing.get(
+                "start_code"
+            )
+        )
 
     # ----------------------------------------------
     # NEW EPISODE
     # ----------------------------------------------
 
+    start_code = generate_start_code()
+
+    episode_key = (
+        f"{normalize_text(series_name)}"
+        f"__"
+        f"{episode_number}"
+    )
+
+    data = {
+
+        "episode_key":
+            episode_key,
+
+        "series_name":
+            series_name,
+
+        "episode_number":
+            episode_number,
+
+        "start_code":
+            start_code,
+
+        "files":
+            [file_data]
+
+    }
+
     result = sb_request(
+
         "POST",
+
         "episodes",
-        data={
-            "episode_key":
-                episode_key,
 
-            "series_name":
-                series_name,
+        json_data=data,
 
-            "episode_number":
-                episode_number,
+        headers_extra={
 
-            "files":
-                [file_data]
+            "Prefer":
+                "return=representation"
+
         }
+
     )
 
     if result is None:
 
         return False, None
 
-    return True, episode_key
-
-
-# ==================================================
-# GET EPISODE
-# ==================================================
-
-def get_episode(episode_key):
-
-    result = sb_request(
-        "GET",
-        "episodes",
-        params={
-            "episode_key":
-                f"eq.{episode_key}",
-
-            "select": "*"
-        }
-    )
-
-    if not result:
-
-        return None
-
-    return result[0]
-
-
-# ==================================================
-# PENDING
-# ==================================================
-
-def set_pending(
-    user_id,
-    episode_key
-):
-
-    sb_request(
-        "POST",
-        "pending",
-        data={
-            "user_id":
-                user_id,
-
-            "episode_key":
-                episode_key
-        }
-    )
-
-
-def get_pending(user_id):
-
-    result = sb_request(
-        "GET",
-        "pending",
-        params={
-            "user_id":
-                f"eq.{user_id}",
-
-            "select": "*"
-        }
-    )
-
-    if not result:
-
-        return None
-
-    return result[0]
-
-
-def delete_pending(user_id):
-
-    sb_request(
-        "DELETE",
-        "pending",
-        params={
-            "user_id":
-                f"eq.{user_id}"
-        }
-    )
+    return True, start_code
 
 
 # ==================================================
@@ -495,12 +580,21 @@ def delete_pending(user_id):
 def get_sponsors():
 
     result = sb_request(
+
         "GET",
+
         "sponsors",
+
         params={
-            "select": "*",
-            "order": "id.asc"
+
+            "select":
+                "*",
+
+            "order":
+                "id.asc"
+
         }
+
     )
 
     return result or []
@@ -513,9 +607,13 @@ def add_sponsor(
 ):
 
     result = sb_request(
+
         "POST",
+
         "sponsors",
-        data={
+
+        json_data={
+
             "chat_id":
                 chat_id,
 
@@ -524,7 +622,16 @@ def add_sponsor(
 
             "url":
                 url
+
+        },
+
+        headers_extra={
+
+            "Prefer":
+                "return=representation"
+
         }
+
     )
 
     return result is not None
@@ -535,56 +642,18 @@ def remove_sponsor(
 ):
 
     result = sb_request(
+
         "DELETE",
+
         "sponsors",
+
         params={
+
             "id":
                 f"eq.{sponsor_id}"
+
         }
-    )
 
-    return result is not None
-
-
-# ==================================================
-# DELETE ONE EPISODE
-# ==================================================
-
-def delete_episode(
-    series_name,
-    episode_number
-):
-
-    episode_key = make_episode_key(
-        series_name,
-        episode_number
-    )
-
-    result = sb_request(
-        "DELETE",
-        "episodes",
-        params={
-            "episode_key":
-                f"eq.{episode_key}"
-        }
-    )
-
-    return result is not None
-
-
-# ==================================================
-# DELETE ALL EPISODES
-# ==================================================
-
-def delete_all_episodes():
-
-    result = sb_request(
-        "DELETE",
-        "episodes",
-        params={
-            "id":
-                "not.is.null"
-        }
     )
 
     return result is not None
@@ -595,26 +664,41 @@ def delete_all_episodes():
 # ==================================================
 
 def is_member(
-    chat_id,
-    user_id
+    user_id,
+    chat_id
 ):
 
     result = tg(
+
         "getChatMember",
+
         {
+
             "chat_id":
                 chat_id,
 
             "user_id":
                 user_id
+
         }
+
     )
 
-    if not result.get("ok"):
+    if not result:
 
         return False
 
-    status = result["result"]["status"]
+    if not result.get(
+        "ok"
+    ):
+
+        return False
+
+    status = (
+        result
+        .get("result", {})
+        .get("status")
+    )
 
     return status in [
 
@@ -627,132 +711,94 @@ def is_member(
     ]
 
 
-def check_all_channels(user_id):
-
-    # ----------------------------------------------
-    # MAIN CHANNEL
-    # ----------------------------------------------
+def check_all_memberships(
+    user_id
+):
 
     if not is_member(
-        CHANNEL_ID,
-        user_id
+        user_id,
+        CHANNEL_ID
     ):
 
-        return False, "main"
-
-
-    # ----------------------------------------------
-    # SPONSORS
-    # ----------------------------------------------
+        return False
 
     sponsors = get_sponsors()
 
     for sponsor in sponsors:
-
-        chat_id = sponsor["chat_id"]
 
         if not is_member(
-            chat_id,
-            user_id
+            user_id,
+            sponsor["chat_id"]
         ):
 
-            return False, sponsor
+            return False
 
-    return True, None
+    return True
 
 
 # ==================================================
-# BUTTONS
+# KEYBOARDS
 # ==================================================
 
-def join_button():
+def join_keyboard():
 
-    return {
+    rows = []
 
-        "inline_keyboard": [
+    rows.append([
 
-            [
+        {
 
-                {
-                    "text":
-                        "📢 عضویت در کانال اصلی",
+            "text":
+                "عضویت در کانال اصلی 📢",
 
-                    "url":
-                        CHANNEL_URL
-                }
+            "url":
+                CHANNEL_URL
 
-            ],
+        }
 
-            [
-
-                {
-                    "text":
-                        "عضو شدم ✅",
-
-                    "callback_data":
-                        "check_join"
-                }
-
-            ]
-
-        ]
-
-    }
-
-
-def sponsor_buttons():
+    ])
 
     sponsors = get_sponsors()
 
-    buttons = []
-
     for sponsor in sponsors:
 
-        buttons.append(
-
-            [
-
-                {
-
-                    "text":
-                        f"📢 {sponsor['title']}",
-
-                    "url":
-                        sponsor["url"]
-
-                }
-
-            ]
-
-        )
-
-    buttons.append(
-
-        [
+        rows.append([
 
             {
 
                 "text":
-                    "عضو شدم ✅",
+                    f"عضویت در {sponsor['title']}",
 
-                "callback_data":
-                    "check_join"
+                "url":
+                    sponsor["url"]
 
             }
 
-        ]
+        ])
 
-    )
+    rows.append([
+
+        {
+
+            "text":
+                "عضو شدم ✅",
+
+            "callback_data":
+                "check_join"
+
+        }
+
+    ])
 
     return {
 
         "inline_keyboard":
-            buttons
+            rows
 
     }
 
 
-def done_button():
+def done_keyboard():
 
     return {
 
@@ -766,7 +812,7 @@ def done_button():
                         "انجام شد ✅",
 
                     "callback_data":
-                        "check_done"
+                        "done"
 
                 }
 
@@ -778,56 +824,40 @@ def done_button():
 
 
 # ==================================================
-# SHOW JOIN
+# STEP 1
 # ==================================================
 
-def show_join_step(chat_id):
+def show_join(
+    chat_id
+):
 
-    sponsors = get_sponsors()
+    text = (
 
-    if sponsors:
+        "برای دریافت فایل، "
+        "اول در کانال‌های زیر عضو شو 👇\n\n"
 
-        text = (
-            "برای دریافت فایل باید اول "
-            "در کانال‌های زیر عضو بشی 👇\n\n"
-        )
+        "بعد روی «عضو شدم ✅» بزن."
 
-        for i, sponsor in enumerate(
-            sponsors,
-            1
-        ):
+    )
 
-            text += (
-                f"{i}. "
-                f"{sponsor['title']}\n"
-            )
+    send_message(
 
-        text += (
-            "\nبعد از عضویت روی "
-            "«عضو شدم ✅» بزن."
-        )
+        chat_id,
 
-        send_message(
-            chat_id,
-            text,
-            sponsor_buttons()
-        )
+        text,
 
-    else:
+        join_keyboard()
 
-        send_message(
-            chat_id,
-            "برای دریافت فایل اول "
-            "عضو کانال اصلی شو 👇",
-            join_button()
-        )
+    )
 
 
 # ==================================================
-# SECOND STEP
+# STEP 2
 # ==================================================
 
-def show_second_step(chat_id):
+def show_second_step(
+    chat_id
+):
 
     text = (
 
@@ -842,9 +872,13 @@ def show_second_step(chat_id):
     )
 
     send_message(
+
         chat_id,
+
         text,
-        done_button()
+
+        done_keyboard()
+
     )
 
 
@@ -864,15 +898,16 @@ def send_episode(
     if not files:
 
         send_message(
+
             chat_id,
-            "❌ فایلی برای این قسمت پیدا نشد."
+
+            "❌ فایل این قسمت پیدا نشد."
+
         )
 
         return
 
-
     sent_messages = []
-
 
     for file_data in files:
 
@@ -882,7 +917,7 @@ def send_episode(
 
         file_type = file_data.get(
             "file_type",
-            "نامشخص"
+            "فایل"
         )
 
         caption = file_data.get(
@@ -890,18 +925,16 @@ def send_episode(
             ""
         )
 
-
-        # ------------------------------------------
-        # VIDEO
-        # ------------------------------------------
-
         if file_data.get(
             "type"
         ) == "video":
 
             result = tg(
+
                 "sendVideo",
+
                 {
+
                     "chat_id":
                         chat_id,
 
@@ -910,19 +943,19 @@ def send_episode(
 
                     "caption":
                         caption
+
                 }
+
             )
-
-
-        # ------------------------------------------
-        # DOCUMENT
-        # ------------------------------------------
 
         else:
 
             result = tg(
+
                 "sendDocument",
+
                 {
+
                     "chat_id":
                         chat_id,
 
@@ -931,24 +964,22 @@ def send_episode(
 
                     "caption":
                         caption
+
                 }
+
             )
 
+        if result and result.get(
+            "ok"
+        ):
 
-        if result.get("ok"):
+            message_id = (
+                result["result"]["message_id"]
+            )
 
             sent_messages.append(
-
-                result["result"][
-                    "message_id"
-                ]
-
+                message_id
             )
-
-
-    # ------------------------------------------
-    # DELETE AFTER 30 SEC
-    # ------------------------------------------
 
     def delete_later():
 
@@ -963,7 +994,6 @@ def send_episode(
                 message_id
             )
 
-
     threading.Thread(
         target=delete_later,
         daemon=True
@@ -971,202 +1001,65 @@ def send_episode(
 
 
 # ==================================================
-# CONTINUE AFTER DONE
+# CALLBACK
 # ==================================================
 
-def continue_after_done(
-    chat_id,
-    user_id
+def handle_callback(
+    callback
 ):
 
-    pending = get_pending(
-        user_id
+    callback_id = callback.get(
+        "id"
     )
 
-    if not pending:
-
-        send_message(
-            chat_id,
-            "❌ لینک منقضی شده. "
-            "دوباره لینک قسمت رو باز کن."
-        )
-
-        return
-
-
-    # ------------------------------------------
-    # WAIT A LITTLE
-    # ------------------------------------------
-
-    created_at = pending.get(
-        "created_at"
+    data = callback.get(
+        "data",
+        ""
     )
 
-    if created_at:
-
-        try:
-
-            from datetime import datetime
-
-            created = datetime.fromisoformat(
-
-                created_at.replace(
-                    "Z",
-                    "+00:00"
-                )
-
-            )
-
-            now = datetime.now(
-                created.tzinfo
-            )
-
-            elapsed = (
-                now - created
-            ).total_seconds()
-
-            if elapsed < 2:
-
-                time.sleep(
-                    2 - elapsed
-                )
-
-        except Exception:
-
-            pass
-
-
-    episode_key = pending[
-        "episode_key"
-    ]
-
-    episode = get_episode(
-        episode_key
-    )
-
-    if not episode:
-
-        delete_pending(
-            user_id
-        )
-
-        send_message(
-            chat_id,
-            "❌ این قسمت پیدا نشد."
-        )
-
-        return
-
-
-    send_episode(
-        chat_id,
-        episode
-    )
-
-    delete_pending(
-        user_id
-    )
-
-
-# ==================================================
-# CALLBACK HANDLER
-# ==================================================
-
-def handle_callback(query):
-
-    callback_id = query["id"]
-
-    tg(
-        "answerCallbackQuery",
-        {
-            "callback_query_id":
-                callback_id
-        }
-    )
-
-    user = query["from"]
-
-    user_id = user["id"]
-
-    message = query.get(
+    message = callback.get(
         "message"
-    )
+    ) or {}
 
-    if not message:
-
-        return
-
-    chat_id = message[
+    chat = message.get(
         "chat"
-    ]["id"]
+    ) or {}
 
-    data = query.get(
-        "data"
+    chat_id = chat.get(
+        "id"
     )
 
+    user = callback.get(
+        "from"
+    ) or {}
 
-    # ------------------------------------------
+    user_id = user.get(
+        "id"
+    )
+
+    answer_callback(
+        callback_id
+    )
+
+    # ----------------------------------------------
     # CHECK JOIN
-    # ------------------------------------------
+    # ----------------------------------------------
 
     if data == "check_join":
 
-        ok, failed = check_all_channels(
+        if not check_all_memberships(
             user_id
-        )
-
-        if not ok:
-
-            if failed == "main":
-
-                send_message(
-                    chat_id,
-
-                    "❌ هنوز در کانال اصلی "
-                    "عضو نشدی.\n"
-                    "اول عضو شو و دوباره "
-                    "«عضو شدم ✅» رو بزن.",
-
-                    join_button()
-                )
-
-            else:
-
-                send_message(
-                    chat_id,
-
-                    f"❌ هنوز در کانال "
-                    f"«{failed['title']}» "
-                    f"عضو نشدی.",
-
-                    sponsor_buttons()
-                )
-
-            return
-
-
-        # حذف پیام قبلی
-
-        delete_message(
-            chat_id,
-            message["message_id"]
-        )
-
-
-        pending = get_pending(
-            user_id
-        )
-
-        if not pending:
+        ):
 
             send_message(
+
                 chat_id,
-                "❌ لینک قسمت پیدا نشد.\n"
-                "دوباره لینک قسمت رو باز کن."
+
+                "❌ هنوز در همه کانال‌ها عضو نشدی."
+
             )
 
             return
-
 
         show_second_step(
             chat_id
@@ -1174,21 +1067,111 @@ def handle_callback(query):
 
         return
 
-
-    # ------------------------------------------
+    # ----------------------------------------------
     # DONE
-    # ------------------------------------------
+    # ----------------------------------------------
 
-    if data == "check_done":
+    if data == "done":
 
-        delete_message(
+        send_message(
+
             chat_id,
-            message["message_id"]
+
+            "⏳ در حال آماده‌سازی فایل..."
+
         )
 
-        continue_after_done(
+        start_code = callback.get(
+            "message",
+            {}
+        ).get(
+            "text",
+            ""
+        )
+
+        # pending data handled below
+
+        pending = sb_request(
+
+            "GET",
+
+            "pending",
+
+            params={
+
+                "select":
+                    "*",
+
+                "user_id":
+                    f"eq.{user_id}",
+
+                "limit":
+                    "1"
+
+            }
+
+        )
+
+        if not pending:
+
+            send_message(
+
+                chat_id,
+
+                "❌ درخواست قبلی پیدا نشد. "
+                "دوباره لینک قسمت را باز کن."
+
+            )
+
+            return
+
+        episode_key = pending[0].get(
+            "episode_key"
+        )
+
+        episode = get_episode_by_code(
+            episode_key
+        )
+
+        if not episode:
+
+            # compatibility with old pending records
+
+            episode = get_episode(
+                "",
+                0
+            )
+
+        if not episode:
+
+            send_message(
+
+                chat_id,
+
+                "❌ قسمت موردنظر پیدا نشد."
+
+            )
+
+            return
+
+        send_episode(
             chat_id,
-            user_id
+            episode
+        )
+
+        sb_request(
+
+            "DELETE",
+
+            "pending",
+
+            params={
+
+                "user_id":
+                    f"eq.{user_id}"
+
+            }
+
         )
 
         return
@@ -1198,15 +1181,25 @@ def handle_callback(query):
 # START
 # ==================================================
 
-def handle_start(message):
+def handle_start(
+    message
+):
 
-    chat_id = message[
+    chat = message.get(
         "chat"
-    ]["id"]
+    ) or {}
 
-    user_id = message[
+    chat_id = chat.get(
+        "id"
+    )
+
+    user = message.get(
         "from"
-    ]["id"]
+    ) or {}
+
+    user_id = user.get(
+        "id"
+    )
 
     text = message.get(
         "text",
@@ -1220,82 +1213,114 @@ def handle_start(message):
     if len(parts) < 2:
 
         send_message(
+
             chat_id,
-            "سلام 👋\n\n"
-            "برای دریافت قسمت، "
-            "لینک قسمت رو باز کن."
+
+            "سلام 👋\n"
+            "لینک قسمت موردنظر رو باز کن."
+
         )
 
         return
 
+    start_code = parts[1].strip()
 
-    start_param = parts[1].strip()
-
-
-    if not start_param.startswith(
+    if start_code.startswith(
         "ep_"
     ):
 
+        start_code = start_code[3:]
+
+    # فقط حروف انگلیسی و عدد
+
+    if not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,64}",
+        start_code
+    ):
+
         send_message(
+
             chat_id,
+
             "❌ لینک قسمت نامعتبره."
+
         )
 
         return
 
-
-    episode_key = start_param[
-        3:
-    ]
-
-    episode = get_episode(
-        episode_key
+    episode = get_episode_by_code(
+        start_code
     )
 
     if not episode:
 
         send_message(
+
             chat_id,
-            "❌ این قسمت پیدا نشد "
-            "یا حذف شده."
+
+            "❌ این قسمت پیدا نشد یا لینک آن اشتباه است."
+
         )
 
         return
 
+    # ----------------------------------------------
+    # SAVE PENDING
+    # ----------------------------------------------
 
-    # ذخیره pending
+    sb_request(
 
-    set_pending(
-        user_id,
-        episode_key
+        "DELETE",
+
+        "pending",
+
+        params={
+
+            "user_id":
+                f"eq.{user_id}"
+
+        }
+
     )
 
+    sb_request(
 
-    # بررسی عضویت
+        "POST",
 
-    ok, failed = check_all_channels(
+        "pending",
+
+        json_data={
+
+            "user_id":
+                user_id,
+
+            "episode_key":
+                start_code
+
+        },
+
+        headers_extra={
+
+            "Prefer":
+                "return=minimal"
+
+        }
+
+    )
+
+    # ----------------------------------------------
+    # MEMBERSHIP
+    # ----------------------------------------------
+
+    if not check_all_memberships(
         user_id
-    )
+    ):
 
-    if not ok:
-
-        if failed == "main":
-
-            send_message(
-                chat_id,
-                "برای دریافت این قسمت "
-                "اول عضو کانال اصلی شو 👇",
-                join_button()
-            )
-
-        else:
-
-            show_join_step(
-                chat_id
-            )
+        show_join(
+            chat_id
+        )
 
         return
-
 
     show_second_step(
         chat_id
@@ -1303,400 +1328,108 @@ def handle_start(message):
 
 
 # ==================================================
-# ADMIN MESSAGE
+# ADMIN UPLOAD
 # ==================================================
 
-def handle_admin_message(message):
+def handle_admin_upload(
+    message
+):
 
-    chat_id = message[
+    chat = message.get(
         "chat"
-    ]["id"]
+    ) or {}
 
-    user_id = message[
-        "from"
-    ]["id"]
-
-
-    if user_id != ADMIN_ID:
-
-        return False
-
-
-    text = message.get(
-        "text",
-        ""
+    chat_id = chat.get(
+        "id"
     )
 
+    caption = ""
 
-    # ==================================================
-    # DELETE ONE EPISODE
-    # ==================================================
+    file_id = None
 
-    if text.startswith(
-        "/delete_episode"
-    ):
+    file_type = None
 
-        command = text.replace(
-            "/delete_episode",
-            "",
-            1
-        ).strip()
+    # ----------------------------------------------
+    # VIDEO
+    # ----------------------------------------------
 
-        parts = [
-
-            x.strip()
-
-            for x in command.split("|")
-
-        ]
-
-
-        if len(parts) != 2:
-
-            send_message(
-                chat_id,
-
-                "فرمت درست:\n\n"
-
-                "/delete_episode "
-                "اسم سریال | شماره قسمت\n\n"
-
-                "مثال:\n"
-
-                "/delete_episode "
-                "بالا پایین استانبول | 14"
-            )
-
-            return True
-
-
-        series_name = parts[0]
-
-
-        try:
-
-            episode_number = int(
-                parts[1]
-            )
-
-        except:
-
-            send_message(
-                chat_id,
-                "❌ شماره قسمت نامعتبره."
-            )
-
-            return True
-
-
-        success = delete_episode(
-            series_name,
-            episode_number
-        )
-
-
-        if success:
-
-            send_message(
-                chat_id,
-
-                f"✅ قسمت "
-                f"{episode_number} "
-                f"سریال «{series_name}» "
-                f"حذف شد."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-                "❌ حذف قسمت انجام نشد."
-            )
-
-
-        return True
-
-
-    # ==================================================
-    # DELETE ALL
-    # ==================================================
-
-    if text == "/delete_all":
-
-        success = delete_all_episodes()
-
-
-        if success:
-
-            send_message(
-                chat_id,
-
-                "🗑 تمام قسمت‌های "
-                "ذخیره‌شده با موفقیت حذف شدند."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-
-                "❌ حذف قسمت‌ها انجام نشد."
-            )
-
-
-        return True
-
-
-    # ==================================================
-    # ADD SPONSOR
-    # ==================================================
-
-    if text.startswith(
-        "/add_sponsor"
-    ):
-
-        command = text.replace(
-            "/add_sponsor",
-            "",
-            1
-        ).strip()
-
-
-        parts = [
-
-            x.strip()
-
-            for x in command.split("|")
-
-        ]
-
-
-        if len(parts) != 3:
-
-            send_message(
-                chat_id,
-
-                "فرمت درست:\n\n"
-
-                "/add_sponsor "
-                "@channel | نام کانال | "
-                "https://t.me/channel"
-            )
-
-            return True
-
-
-        chat_username = parts[0]
-
-        title = parts[1]
-
-        url = parts[2]
-
-
-        success = add_sponsor(
-            chat_username,
-            title,
-            url
-        )
-
-
-        if success:
-
-            send_message(
-                chat_id,
-
-                "✅ اسپانسر با موفقیت اضافه شد."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-
-                "❌ ذخیره اسپانسر انجام نشد."
-            )
-
-
-        return True
-
-
-    # ==================================================
-    # SPONSORS
-    # ==================================================
-
-    if text == "/sponsors":
-
-        sponsors = get_sponsors()
-
-
-        if not sponsors:
-
-            send_message(
-                chat_id,
-
-                "❌ هیچ اسپانسری ثبت نشده."
-            )
-
-            return True
-
-
-        result = "📋 لیست اسپانسرها:\n\n"
-
-
-        for sponsor in sponsors:
-
-            result += (
-
-                f"🆔 {sponsor['id']}\n"
-
-                f"📢 {sponsor['title']}\n"
-
-                f"🔗 {sponsor['url']}\n\n"
-
-            )
-
-
-        send_message(
-            chat_id,
-            result
-        )
-
-        return True
-
-
-    # ==================================================
-    # REMOVE SPONSOR
-    # ==================================================
-
-    if text.startswith(
-        "/remove_sponsor"
-    ):
-
-        parts = text.split()
-
-
-        if len(parts) != 2:
-
-            send_message(
-                chat_id,
-
-                "فرمت:\n\n"
-
-                "/remove_sponsor ID"
-            )
-
-            return True
-
-
-        try:
-
-            sponsor_id = int(
-                parts[1]
-            )
-
-        except:
-
-            send_message(
-                chat_id,
-                "❌ ID نامعتبره."
-            )
-
-            return True
-
-
-        success = remove_sponsor(
-            sponsor_id
-        )
-
-
-        if success:
-
-            send_message(
-                chat_id,
-
-                "✅ اسپانسر حذف شد."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-
-                "❌ حذف اسپانسر انجام نشد."
-            )
-
-
-        return True
-
-
-    # ==================================================
-    # UPLOAD EPISODE
-    # ==================================================
-
-    video = message.get(
+    if message.get(
         "video"
-    )
+    ):
 
-    document = message.get(
+        video = message["video"]
+
+        file_id = video.get(
+            "file_id"
+        )
+
+        file_type = "video"
+
+        caption = (
+            message.get(
+                "caption"
+            )
+            or ""
+        )
+
+    # ----------------------------------------------
+    # DOCUMENT
+    # ----------------------------------------------
+
+    elif message.get(
         "document"
-    )
+    ):
 
+        document = message["document"]
 
-    if not video and not document:
+        file_id = document.get(
+            "file_id"
+        )
+
+        file_type = "document"
+
+        caption = (
+            message.get(
+                "caption"
+            )
+            or ""
+        )
+
+    else:
 
         return False
-
-
-    caption = message.get(
-        "caption",
-        ""
-    )
-
 
     parsed = parse_episode_caption(
         caption
     )
 
-
-    if not parsed:
+    if not parsed.get(
+        "series_name"
+    ):
 
         send_message(
+
             chat_id,
 
-            "❌ کپشن قابل تشخیص نیست.\n\n"
+            "❌ اسم سریال داخل کپشن پیدا نشد."
 
-            "فرمت درست:\n\n"
-
-            "سریال: بالا پایین استانبول\n"
-
-            "قسمت: 14\n"
-
-            "زیرنویس مووی باز"
         )
 
         return True
 
+    if not parsed.get(
+        "episode_number"
+    ):
 
-    # ==================================================
-    # FILE DATA
-    # ==================================================
+        send_message(
 
-    if video:
+            chat_id,
 
-        file_id = video[
-            "file_id"
-        ]
+            "❌ شماره قسمت داخل کپشن پیدا نشد."
 
-        file_type = "video"
+        )
 
-    else:
-
-        file_id = document[
-            "file_id"
-        ]
-
-        file_type = "document"
-
+        return True
 
     file_data = {
 
@@ -1707,15 +1440,14 @@ def handle_admin_message(message):
             file_type,
 
         "file_type":
-                parsed["file_type"],
+            parsed["file_type"],
 
         "caption":
             caption
 
     }
 
-
-    success, episode_key = save_episode(
+    success, start_code = save_episode(
 
         parsed["series_name"],
 
@@ -1725,26 +1457,25 @@ def handle_admin_message(message):
 
     )
 
-
     if not success:
 
         send_message(
+
             chat_id,
 
             "❌ ذخیره قسمت انجام نشد."
+
         )
 
         return True
 
-
     link = (
 
         f"https://t.me/"
-        f"Seryyaltorki_bot"
-        f"?start=ep_{episode_key}"
+        f"{BOT_USERNAME}"
+        f"?start={start_code}"
 
     )
-
 
     send_message(
 
@@ -1759,26 +1490,388 @@ def handle_admin_message(message):
         f"{parsed['episode_number']}\n"
 
         f"📦 نوع فایل: "
-        f"{parsed['file_type']}\n"
+        f"{parsed['file_type']}\n\n"
 
-        f"🔗 {link}"
+        f"🔗 لینک دریافت:\n"
+        f"{link}"
 
     )
 
-
     return True
+
+
+# ==================================================
+# ADMIN COMMANDS
+# ==================================================
+
+def handle_admin_message(
+    message
+):
+
+    chat = message.get(
+        "chat"
+    ) or {}
+
+    chat_id = chat.get(
+        "id"
+    )
+
+    text = message.get(
+        "text",
+        ""
+    ).strip()
+
+    # ----------------------------------------------
+    # ADD SPONSOR
+    # ----------------------------------------------
+
+    if text.startswith(
+        "/add_sponsor"
+    ):
+
+        content = text[
+            len("/add_sponsor"):
+        ].strip()
+
+        parts = [
+            x.strip()
+            for x in content.split("|")
+        ]
+
+        if len(parts) != 3:
+
+            send_message(
+
+                chat_id,
+
+                "فرمت درست:\n\n"
+                "/add_sponsor @channel | نام کانال | https://t.me/channel"
+
+            )
+
+            return True
+
+        sponsor_chat = parts[0]
+
+        title = parts[1]
+
+        url = parts[2]
+
+        success = add_sponsor(
+
+            sponsor_chat,
+
+            title,
+
+            url
+
+        )
+
+        if success:
+
+            send_message(
+
+                chat_id,
+
+                "✅ اسپانسر با موفقیت ذخیره شد."
+
+            )
+
+        else:
+
+            send_message(
+
+                chat_id,
+
+                "❌ ذخیره اسپانسر انجام نشد."
+
+            )
+
+        return True
+
+    # ----------------------------------------------
+    # SPONSORS
+    # ----------------------------------------------
+
+    if text == "/sponsors":
+
+        sponsors = get_sponsors()
+
+        if not sponsors:
+
+            send_message(
+
+                chat_id,
+
+                "هیچ اسپانسری ثبت نشده."
+
+            )
+
+            return True
+
+        lines = [
+
+            "📋 لیست اسپانسرها:\n"
+
+        ]
+
+        for sponsor in sponsors:
+
+            lines.append(
+
+                f"🆔 {sponsor['id']}\n"
+                f"📢 {sponsor['title']}\n"
+                f"🔗 {sponsor['url']}\n"
+
+            )
+
+        send_message(
+
+            chat_id,
+
+            "\n".join(lines)
+
+        )
+
+        return True
+
+    # ----------------------------------------------
+    # REMOVE SPONSOR
+    # ----------------------------------------------
+
+    if text.startswith(
+        "/remove_sponsor"
+    ):
+
+        sponsor_id = text[
+            len("/remove_sponsor"):
+        ].strip()
+
+        if not sponsor_id.isdigit():
+
+            send_message(
+
+                chat_id,
+
+                "❌ آیدی اسپانسر نامعتبره."
+
+            )
+
+            return True
+
+        success = remove_sponsor(
+            sponsor_id
+        )
+
+        if success:
+
+            send_message(
+
+                chat_id,
+
+                "✅ اسپانسر حذف شد."
+
+            )
+
+        else:
+
+            send_message(
+
+                chat_id,
+
+                "❌ حذف اسپانسر انجام نشد."
+
+            )
+
+        return True
+
+    # ----------------------------------------------
+    # DELETE EPISODE
+    # ----------------------------------------------
+
+    if text.startswith(
+        "/delete_episode"
+    ):
+
+        content = text[
+            len("/delete_episode"):
+        ].strip()
+
+        parts = [
+
+            x.strip()
+
+            for x in content.split("|")
+
+        ]
+
+        if len(parts) != 2:
+
+            send_message(
+
+                chat_id,
+
+                "فرمت درست:\n\n"
+                "/delete_episode اسم سریال | شماره قسمت"
+
+            )
+
+            return True
+
+        series_name = parts[0]
+
+        try:
+
+            episode_number = int(
+                parts[1]
+            )
+
+        except:
+
+            send_message(
+
+                chat_id,
+
+                "❌ شماره قسمت اشتباهه."
+
+            )
+
+            return True
+
+        episode = get_episode(
+
+            series_name,
+
+            episode_number
+
+        )
+
+        if not episode:
+
+            send_message(
+
+                chat_id,
+
+                "❌ این قسمت پیدا نشد."
+
+            )
+
+            return True
+
+        result = sb_request(
+
+            "DELETE",
+
+            "episodes",
+
+            params={
+
+                "id":
+                    f"eq.{episode['id']}"
+
+            }
+
+        )
+
+        if result is None:
+
+            send_message(
+
+                chat_id,
+
+                "❌ حذف قسمت انجام نشد."
+
+            )
+
+        else:
+
+            send_message(
+
+                chat_id,
+
+                "✅ قسمت حذف شد."
+
+            )
+
+        return True
+
+    # ----------------------------------------------
+    # DELETE ALL
+    # ----------------------------------------------
+
+    if text == "/delete_all":
+
+        result = sb_request(
+
+            "DELETE",
+
+            "episodes",
+
+            params={
+
+                "id":
+                    "not.is.null"
+
+            }
+
+        )
+
+        if result is None:
+
+            send_message(
+
+                chat_id,
+
+                "❌ حذف همه قسمت‌ها انجام نشد."
+
+            )
+
+        else:
+
+            send_message(
+
+                chat_id,
+
+                "✅ همه قسمت‌ها حذف شدند."
+
+            )
+
+        return True
+
+    # ----------------------------------------------
+    # UPLOAD
+    # ----------------------------------------------
+
+    if message.get(
+        "video"
+    ) or message.get(
+        "document"
+    ):
+
+        return handle_admin_upload(
+            message
+        )
+
+    return False
 
 
 # ==================================================
 # MESSAGE HANDLER
 # ==================================================
 
-def handle_message(message):
+def handle_message(
+    message
+):
 
-    if message.get(
-        "from",
-        {}
-    ).get("id") == ADMIN_ID:
+    user = message.get(
+        "from"
+    ) or {}
+
+    user_id = user.get(
+        "id"
+    )
+
+    if user_id == ADMIN_ID:
 
         handled = handle_admin_message(
             message
@@ -1788,12 +1881,10 @@ def handle_message(message):
 
             return
 
-
     text = message.get(
         "text",
         ""
     )
-
 
     if text.startswith(
         "/start"
@@ -1822,13 +1913,11 @@ def webhook():
             force=True
         )
 
-
         if "message" in update:
 
             handle_message(
                 update["message"]
             )
-
 
         elif "callback_query" in update:
 
@@ -1836,9 +1925,7 @@ def webhook():
                 update["callback_query"]
             )
 
-
         return "OK", 200
-
 
     except Exception as e:
 
@@ -1877,19 +1964,20 @@ def testdb():
 
     )
 
-
     if result is None:
 
         return (
-            "❌ اتصال به Supabase "
-            "مشکل دارد.",
-            500
-        )
 
+            "❌ اتصال ربات به Supabase "
+            "مشکل دارد.",
+
+            500
+
+        )
 
     return (
 
-        f"✅ اتصال ربات به Supabase "
+        "✅ اتصال ربات به Supabase "
         f"برقرار است. نتیجه: {result}"
 
     )
@@ -1924,6 +2012,6 @@ if __name__ == "__main__":
 
         host="0.0.0.0",
 
-        port=port
+   port=port
 
     )
