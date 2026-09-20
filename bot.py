@@ -1216,7 +1216,6 @@ def webhook():
 
         # Check reactions
         if data == "check_reactions":
-            data == "check_reactions":
             answer_callback(
                 callback_id,
                 "در حال بررسی ری‌اکشن‌ها..."
