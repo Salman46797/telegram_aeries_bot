@@ -8,9 +8,10 @@ import requests
 from flask import Flask, request, jsonify
 from supabase import create_client
 
-# =========================
+
+# =========================================================
 # SETTINGS
-# =========================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -23,9 +24,10 @@ CHANNEL_URL = "https://t.me/altiustuistsnbol"
 
 DELETE_AFTER = 30
 
-# =========================
-# CHECK SETTINGS
-# =========================
+
+# =========================================================
+# CHECK ENVIRONMENT
+# =========================================================
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing")
@@ -35,6 +37,7 @@ if not SUPABASE_URL:
 
 if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_KEY is missing")
+
 
 supabase = create_client(
     SUPABASE_URL,
@@ -46,9 +49,9 @@ app = Flask(__name__)
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
-# =========================
-# TELEGRAM
-# =========================
+# =========================================================
+# TELEGRAM API
+# =========================================================
 
 def tg(method, data=None):
 
@@ -62,16 +65,24 @@ def tg(method, data=None):
 
         result = response.json()
 
-        print("TG:", method, result)
+        print(
+            "TELEGRAM",
+            method,
+            result
+        )
 
         return result
 
     except Exception as e:
 
-        print("Telegram ERROR:", e)
+        print(
+            "TELEGRAM ERROR:",
+            repr(e)
+        )
 
         return {
-            "ok": False
+            "ok": False,
+            "error": str(e)
         }
 
 
@@ -87,7 +98,6 @@ def send_message(
     }
 
     if reply_markup:
-
         data["reply_markup"] = reply_markup
 
     return tg(
@@ -146,7 +156,9 @@ def get_chat_member(
 
 def get_me():
 
-    return tg("getMe")
+    return tg(
+        "getMe"
+    )
 
 
 def send_video(
@@ -190,9 +202,9 @@ def send_document(
     )
 
 
-# =========================
+# =========================================================
 # EPISODE KEY
-# =========================
+# =========================================================
 
 def make_series_key(series_name):
 
@@ -218,9 +230,9 @@ def make_episode_key(
     )
 
 
-# =========================
+# =========================================================
 # CAPTION
-# =========================
+# =========================================================
 
 def parse_caption(caption):
 
@@ -247,7 +259,10 @@ def parse_caption(caption):
         re.IGNORECASE
     )
 
-    if not series_match or not episode_match:
+    if not series_match:
+        return None
+
+    if not episode_match:
         return None
 
     series_name = series_match.group(1).strip()
@@ -266,11 +281,13 @@ def parse_caption(caption):
     }
 
 
-# =========================
+# =========================================================
 # SUPABASE - EPISODES
-# =========================
+# =========================================================
 
-def get_episode(episode_key):
+def get_episode(
+    episode_key
+):
 
     try:
 
@@ -286,17 +303,24 @@ def get_episode(episode_key):
             .execute()
         )
 
+        print(
+            "GET EPISODE RESULT:",
+            result
+        )
+
         if result.data:
             return result.data[0]
+
+        return None
 
     except Exception as e:
 
         print(
-            "get_episode ERROR:",
-            e
+            "GET EPISODE ERROR:",
+            repr(e)
         )
 
-    return None
+        return None
 
 
 def save_episode(
@@ -308,24 +332,49 @@ def save_episode(
 
     try:
 
+        data = {
+            "episode_key": episode_key,
+            "series_name": series_name,
+            "episode_number": episode_number,
+            "files": files
+        }
+
+        print(
+            "=============================="
+        )
+
+        print(
+            "SAVE EPISODE DATA:"
+        )
+
+        print(
+            data
+        )
+
+        print(
+            "=============================="
+        )
+
         result = (
             supabase
             .table("episodes")
             .upsert(
-                {
-                    "episode_key": episode_key,
-                    "series_name": series_name,
-                    "episode_number": episode_number,
-                    "files": files
-                },
+                data,
                 on_conflict="episode_key"
             )
             .execute()
         )
 
         print(
-            "Episode saved:",
+            "SAVE EPISODE RESULT:"
+        )
+
+        print(
             result
+        )
+
+        print(
+            "=============================="
         )
 
         return result
@@ -333,16 +382,27 @@ def save_episode(
     except Exception as e:
 
         print(
-            "save_episode ERROR:",
-            e
+            "=============================="
+        )
+
+        print(
+            "SAVE EPISODE ERROR:"
+        )
+
+        print(
+            repr(e)
+        )
+
+        print(
+            "=============================="
         )
 
         return None
 
 
-# =========================
+# =========================================================
 # PENDING
-# =========================
+# =========================================================
 
 def set_pending(
     user_id,
@@ -351,7 +411,7 @@ def set_pending(
 
     try:
 
-        return (
+        result = (
             supabase
             .table("pending")
             .upsert(
@@ -364,17 +424,21 @@ def set_pending(
             .execute()
         )
 
+        return result
+
     except Exception as e:
 
         print(
-            "set_pending ERROR:",
-            e
+            "SET PENDING ERROR:",
+            repr(e)
         )
 
         return None
 
 
-def get_pending(user_id):
+def get_pending(
+    user_id
+):
 
     try:
 
@@ -391,7 +455,6 @@ def get_pending(user_id):
         )
 
         if result.data:
-
             return result.data[0].get(
                 "episode_key"
             )
@@ -399,14 +462,16 @@ def get_pending(user_id):
     except Exception as e:
 
         print(
-            "get_pending ERROR:",
-            e
+            "GET PENDING ERROR:",
+            repr(e)
         )
 
     return None
 
 
-def clear_pending(user_id):
+def clear_pending(
+    user_id
+):
 
     try:
 
@@ -424,16 +489,16 @@ def clear_pending(user_id):
     except Exception as e:
 
         print(
-            "clear_pending ERROR:",
-            e
+            "CLEAR PENDING ERROR:",
+            repr(e)
         )
 
         return None
 
 
-# =========================
+# =========================================================
 # SPONSORS
-# =========================
+# =========================================================
 
 def get_sponsors():
 
@@ -452,8 +517,8 @@ def get_sponsors():
     except Exception as e:
 
         print(
-            "get_sponsors ERROR:",
-            e
+            "GET SPONSORS ERROR:",
+            repr(e)
         )
 
         return []
@@ -481,7 +546,7 @@ def add_sponsor(
         )
 
         print(
-            "Sponsor saved:",
+            "SPONSOR SAVED:",
             result
         )
 
@@ -490,8 +555,8 @@ def add_sponsor(
     except Exception as e:
 
         print(
-            "add_sponsor ERROR:",
-            e
+            "ADD SPONSOR ERROR:",
+            repr(e)
         )
 
         return None
@@ -517,16 +582,16 @@ def remove_sponsor(
     except Exception as e:
 
         print(
-            "remove_sponsor ERROR:",
-            e
+            "REMOVE SPONSOR ERROR:",
+            repr(e)
         )
 
         return None
 
 
-# =========================
+# =========================================================
 # CHANNEL POSTS
-# =========================
+# =========================================================
 
 def save_channel_post(
     message_id
@@ -551,14 +616,16 @@ def save_channel_post(
     except Exception as e:
 
         print(
-            "save_channel_post ERROR:",
-            e
+            "SAVE CHANNEL POST ERROR:",
+            repr(e)
         )
 
         return None
 
 
-def get_last_posts(limit=5):
+def get_last_posts(
+    limit=5
+):
 
     try:
 
@@ -579,16 +646,16 @@ def get_last_posts(limit=5):
     except Exception as e:
 
         print(
-            "get_last_posts ERROR:",
-            e
+            "GET LAST POSTS ERROR:",
+            repr(e)
         )
 
         return []
 
 
-# =========================
+# =========================================================
 # REACTIONS
-# =========================
+# =========================================================
 
 def save_reaction(
     user_id,
@@ -615,8 +682,8 @@ def save_reaction(
     except Exception as e:
 
         print(
-            "save_reaction ERROR:",
-            e
+            "SAVE REACTION ERROR:",
+            repr(e)
         )
 
         return None
@@ -649,13 +716,15 @@ def has_reacted(
             .execute()
         )
 
-        return bool(result.data)
+        return bool(
+            result.data
+        )
 
     except Exception as e:
 
         print(
-            "has_reacted ERROR:",
-            e
+            "HAS REACTED ERROR:",
+            repr(e)
         )
 
         return False
@@ -666,7 +735,9 @@ def user_reacted_to_last_posts(
     limit=5
 ):
 
-    posts = get_last_posts(limit)
+    posts = get_last_posts(
+        limit
+    )
 
     if len(posts) < limit:
         return False
@@ -689,9 +760,9 @@ def user_reacted_to_last_posts(
     return True
 
 
-# =========================
+# =========================================================
 # MEMBERSHIP
-# =========================
+# =========================================================
 
 def member_status(
     chat_id,
@@ -750,6 +821,7 @@ def check_all_sponsors(
             chat_id,
             user_id
         ):
+
             missing.append(
                 sponsor
             )
@@ -757,9 +829,9 @@ def check_all_sponsors(
     return missing
 
 
-# =========================
+# =========================================================
 # KEYBOARDS
-# =========================
+# =========================================================
 
 def sponsor_keyboard(
     sponsors
@@ -774,7 +846,9 @@ def sponsor_keyboard(
             or "کانال اسپانسر"
         )
 
-        url = sponsor.get("url")
+        url = sponsor.get(
+            "url"
+        )
 
         if url:
 
@@ -835,9 +909,9 @@ def channel_keyboard():
     }
 
 
-# =========================
+# =========================================================
 # USER FLOW
-# =========================
+# =========================================================
 
 def show_reaction_page(
     chat_id,
@@ -890,7 +964,9 @@ def show_join_page(
         send_message(
             chat_id,
             "برای دریافت فایل، اول عضو کانال‌های زیر شو 👇",
-            sponsor_keyboard(missing)
+            sponsor_keyboard(
+                missing
+            )
         )
 
         return
@@ -901,9 +977,9 @@ def show_join_page(
     )
 
 
-# =========================
+# =========================================================
 # SEND EPISODE
-# =========================
+# =========================================================
 
 def send_episode_to_user(
     chat_id,
@@ -1055,11 +1131,13 @@ def delete_sent_messages_later(
     )
 
 
-# =========================
+# =========================================================
 # FILE HANDLING
-# =========================
+# =========================================================
 
-def extract_file(message):
+def extract_file(
+    message
+):
 
     if message.get("video"):
 
@@ -1103,7 +1181,6 @@ def handle_admin_file(
     )
 
     if not file_info:
-
         return False
 
     caption = file_info.get(
@@ -1162,11 +1239,16 @@ def handle_admin_file(
 
         send_message(
             ADMIN_ID,
-            "❌ ذخیره ویدیو انجام نشد.\n"
-            "لاگ Render رو بررسی کن."
+            "❌ ذخیره ویدیو انجام نشد.\n\n"
+            "جزئیات خطا داخل Logs رندر ثبت شده."
         )
 
         return True
+
+    send_message(
+        ADMIN_ID,
+        "⏳ فایل در حال بررسی ذخیره‌سازی است..."
+    )
 
     bot = get_me()
 
@@ -1180,7 +1262,7 @@ def handle_admin_file(
 
         send_message(
             ADMIN_ID,
-            "✅ فایل ذخیره شد ولی نام کاربری ربات پیدا نشد."
+            "❌ فایل ذخیره شد ولی نام کاربری ربات پیدا نشد."
         )
 
         return True
@@ -1207,9 +1289,9 @@ def handle_admin_file(
     return True
 
 
-# =========================
+# =========================================================
 # ADMIN COMMANDS
-# =========================
+# =========================================================
 
 def handle_admin_command(
     chat_id,
@@ -1222,21 +1304,19 @@ def handle_admin_command(
 
     text = text.strip()
 
-    # START
     if text == "/start":
 
         send_message(
             chat_id,
             "🛠 پنل مدیریت ربات فعال است ✅\n\n"
             "/sponsors\n"
-            "/episodes\n"
             "/add_sponsor @channel | نام کانال | https://t.me/channel\n"
             "/remove_sponsor ID"
         )
 
         return True
 
-    # SPONSORS
+
     if text == "/sponsors":
 
         sponsors = get_sponsors()
@@ -1257,14 +1337,10 @@ def handle_admin_command(
         for sponsor in sponsors:
 
             lines.append(
-                f"🆔 ID: "
-                f"{sponsor.get('id')}\n"
-                f"📢 کانال: "
-                f"{sponsor.get('chat_id')}\n"
-                f"📝 نام: "
-                f"{sponsor.get('title')}\n"
-                f"🔗 لینک: "
-                f"{sponsor.get('url')}\n"
+                f"🆔 ID: {sponsor.get('id')}\n"
+                f"📢 کانال: {sponsor.get('chat_id')}\n"
+                f"📝 نام: {sponsor.get('title')}\n"
+                f"🔗 لینک: {sponsor.get('url')}\n"
             )
 
         send_message(
@@ -1274,7 +1350,7 @@ def handle_admin_command(
 
         return True
 
-    # ADD SPONSOR
+
     if text.startswith(
         "/add_sponsor"
     ):
@@ -1293,17 +1369,16 @@ def handle_admin_command(
             send_message(
                 chat_id,
                 "❌ فرمت اشتباهه.\n\n"
-                "فرمت درست:\n"
                 "/add_sponsor @channel | نام کانال | https://t.me/channel"
             )
 
             return True
 
-        chat_id_value = parts[0]
+        sponsor_chat_id = parts[0]
         title = parts[1]
         url = parts[2]
 
-        if not chat_id_value.startswith("@"):
+        if not sponsor_chat_id.startswith("@"):
 
             send_message(
                 chat_id,
@@ -1318,57 +1393,13 @@ def handle_admin_command(
 
             send_message(
                 chat_id,
-                "❌ لینک کانال باید مثل این باشه:\n"
-                "https://t.me/channel"
+                "❌ لینک باید با https://t.me/ شروع بشه."
             )
 
             return True
 
-        bot_info = get_me()
-
-        bot_user_id = (
-            bot_info
-            .get("result", {})
-            .get("id")
-        )
-
-        if bot_user_id:
-
-            check = get_chat_member(
-                chat_id_value,
-                bot_user_id
-            )
-
-            if not check.get("ok"):
-
-                send_message(
-                    chat_id,
-                    "❌ ربات نمی‌تونه کانال اسپانسر رو بررسی کنه.\n\n"
-                    "ربات رو داخل کانال اسپانسر ادمین کن و دوباره امتحان کن."
-                )
-
-                return True
-
-            status = (
-                check
-                .get("result", {})
-                .get("status", "")
-            )
-
-            if status not in (
-                "administrator",
-                "creator"
-            ):
-
-                send_message(
-                    chat_id,
-                    "❌ ربات باید داخل کانال اسپانسر ادمین باشه."
-                )
-
-                return True
-
         saved = add_sponsor(
-            chat_id_value,
+            sponsor_chat_id,
             title,
             url
         )
@@ -1377,8 +1408,8 @@ def handle_admin_command(
 
             send_message(
                 chat_id,
-                "❌ ذخیره اسپانسر انجام نشد.\n\n"
-                "لاگ Render رو بررسی کن."
+                "❌ ذخیره اسپانسر انجام نشد.\n"
+                "خطای دقیق داخل Logs رندر ثبت شده."
             )
 
             return True
@@ -1390,7 +1421,7 @@ def handle_admin_command(
 
         return True
 
-    # REMOVE SPONSOR
+
     if text.startswith(
         "/remove_sponsor"
     ):
@@ -1409,12 +1440,8 @@ def handle_admin_command(
 
             return True
 
-        sponsor_id = int(
-            value
-        )
-
         result = remove_sponsor(
-            sponsor_id
+            int(value)
         )
 
         if result is None:
@@ -1436,9 +1463,9 @@ def handle_admin_command(
     return False
 
 
-# =========================
+# =========================================================
 # START
-# =========================
+# =========================================================
 
 def handle_start(
     chat_id,
@@ -1472,9 +1499,9 @@ def handle_start(
     )
 
 
-# =========================
+# =========================================================
 # CALLBACK
-# =========================
+# =========================================================
 
 def handle_callback(
     callback
@@ -1512,7 +1539,7 @@ def handle_callback(
         "id"
     )
 
-    # JOIN CHECK
+
     if data == "check_join":
 
         answer_callback(
@@ -1541,7 +1568,9 @@ def handle_callback(
             send_message(
                 chat_id,
                 "❌ هنوز عضو همه کانال‌ها نشدی.",
-                sponsor_keyboard(missing)
+                sponsor_keyboard(
+                    missing
+                )
             )
 
             return
@@ -1553,7 +1582,7 @@ def handle_callback(
 
         return
 
-    # REACTION CHECK
+
     if data == "check_reactions":
 
         answer_callback(
@@ -1583,15 +1612,14 @@ def handle_callback(
         return
 
 
-# =========================
-# UPDATE
-# =========================
+# =========================================================
+# PROCESS UPDATE
+# =========================================================
 
 def process_update(
     update
 ):
 
-    # CALLBACK
     if update.get(
         "callback_query"
     ):
@@ -1602,7 +1630,7 @@ def process_update(
 
         return
 
-    # CHANNEL POST
+
     channel_post = update.get(
         "channel_post"
     )
@@ -1620,15 +1648,19 @@ def process_update(
 
         if username == CHANNEL_ID.lstrip("@"):
 
-            save_channel_post(
-                channel_post.get(
-                    "message_id"
-                )
+            message_id = channel_post.get(
+                "message_id"
             )
+
+            if message_id:
+
+                save_channel_post(
+                    message_id
+                )
 
         return
 
-    # MESSAGE
+
     message = update.get(
         "message"
     )
@@ -1659,7 +1691,7 @@ def process_update(
         ""
     )
 
-    # ADMIN FILE
+
     if user_id == ADMIN_ID:
 
         if (
@@ -1673,7 +1705,7 @@ def process_update(
 
                 return
 
-    # COMMANDS
+
     if text.startswith("/"):
 
         if handle_admin_command(
@@ -1684,7 +1716,7 @@ def process_update(
 
             return
 
-    # START
+
     if text.startswith(
         "/start"
     ):
@@ -1708,9 +1740,9 @@ def process_update(
         return
 
 
-# =========================
-# WEBHOOK
-# =========================
+# =========================================================
+# FLASK
+# =========================================================
 
 @app.route(
     "/",
@@ -1748,8 +1780,8 @@ def webhook():
     except Exception as e:
 
         print(
-            "Webhook ERROR:",
-            e
+            "WEBHOOK ERROR:",
+            repr(e)
         )
 
         return jsonify(
@@ -1759,9 +1791,9 @@ def webhook():
         )
 
 
-# =========================
+# =========================================================
 # RUN
-# =========================
+# =========================================================
 
 if __name__ == "__main__":
 
