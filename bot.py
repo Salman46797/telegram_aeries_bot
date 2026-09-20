@@ -1,16 +1,16 @@
 import os
-import json
+import time
 import random
 import string
-import time
 import threading
 import requests
 
 from flask import Flask, request, jsonify
 
-# =========================
+
+# ==================================================
 # CONFIG
-# =========================
+# ==================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -25,49 +25,76 @@ BOT_USERNAME = "Seryyaltorki_bot"
 
 DELETE_AFTER = 30
 
+RENDER_URL = "https://telegram-aeries-bot.onrender.com"
+WEBHOOK_URL = f"{RENDER_URL}/webhook"
+
 app = Flask(__name__)
 
 
-# =========================
-# TELEGRAM API
-# =========================
+# ==================================================
+# LOG
+# ==================================================
 
-def tg(method, data=None):
+def log(*args):
+    print(*args, flush=True)
+
+
+# ==================================================
+# TELEGRAM
+# ==================================================
+
+def telegram(method, data=None):
+
+    if not BOT_TOKEN:
+        log("❌ BOT_TOKEN پیدا نشد")
+        return {"ok": False}
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
 
     try:
-        r = requests.post(url, json=data or {}, timeout=30)
+        r = requests.post(
+            url,
+            json=data or {},
+            timeout=30
+        )
+
         result = r.json()
 
-        print("TG:", method, result)
+        log("TELEGRAM", method, result)
 
         return result
 
     except Exception as e:
-        print("TG ERROR:", method, repr(e))
-        return {"ok": False, "error": str(e)}
+        log("❌ TELEGRAM ERROR:", repr(e))
+        return {"ok": False}
 
 
-def send_message(chat_id, text, reply_markup=None):
+def send_message(chat_id, text, keyboard=None):
+
     data = {
         "chat_id": chat_id,
         "text": text
     }
 
-    if reply_markup:
-        data["reply_markup"] = reply_markup
+    if keyboard:
+        data["reply_markup"] = keyboard
 
-    return tg("sendMessage", data)
+    return telegram("sendMessage", data)
 
 
 def delete_message(chat_id, message_id):
-    return tg("deleteMessage", {
-        "chat_id": chat_id,
-        "message_id": message_id
-    })
+
+    return telegram(
+        "deleteMessage",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id
+        }
+    )
 
 
 def answer_callback(callback_id, text=None):
+
     data = {
         "callback_query_id": callback_id
     }
@@ -75,14 +102,22 @@ def answer_callback(callback_id, text=None):
     if text:
         data["text"] = text
 
-    return tg("answerCallbackQuery", data)
+    return telegram(
+        "answerCallbackQuery",
+        data
+    )
 
 
-# =========================
+# ==================================================
 # SUPABASE
-# =========================
+# ==================================================
 
-def supabase_request(method, table, params=None, json_data=None):
+def supabase(method, table, params=None, body=None):
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        log("❌ SUPABASE ENV ناقص")
+        return []
+
     url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/{table}"
 
     headers = {
@@ -93,16 +128,23 @@ def supabase_request(method, table, params=None, json_data=None):
     }
 
     try:
+
         r = requests.request(
             method,
             url,
             headers=headers,
             params=params,
-            json=json_data,
+            json=body,
             timeout=30
         )
 
-        print("SUPABASE:", method, table, r.status_code, r.text)
+        log(
+            "SUPABASE",
+            method,
+            table,
+            r.status_code,
+            flush=True
+        )
 
         if not r.text:
             return []
@@ -113,21 +155,55 @@ def supabase_request(method, table, params=None, json_data=None):
             return []
 
     except Exception as e:
-        print("SUPABASE ERROR:", repr(e))
+
+        log("❌ SUPABASE ERROR:", repr(e))
+
         return []
 
 
-# =========================
-# RANDOM START CODE
-# =========================
+# ==================================================
+# WEBHOOK SETUP
+# ==================================================
 
-def generate_start_code():
+def setup_webhook():
+
+    log("🔧 Setting webhook...")
+
+    result = telegram(
+        "setWebhook",
+        {
+            "url": WEBHOOK_URL,
+            "allowed_updates": [
+                "message",
+                "callback_query"
+            ],
+            "drop_pending_updates": False
+        }
+    )
+
+    log("WEBHOOK RESULT:", result)
+
+    info = telegram("getWebhookInfo")
+
+    log("WEBHOOK INFO:", info)
+
+
+# ==================================================
+# START CODE
+# ==================================================
+
+def generate_code():
+
     chars = string.ascii_lowercase + string.digits
 
-    for _ in range(50):
-        code = "".join(random.choice(chars) for _ in range(6))
+    for _ in range(100):
 
-        result = supabase_request(
+        code = "".join(
+            random.choice(chars)
+            for _ in range(6)
+        )
+
+        result = supabase(
             "GET",
             "episodes",
             {
@@ -143,60 +219,52 @@ def generate_start_code():
     return str(int(time.time()))[-6:]
 
 
-# =========================
-# TEXT HELPERS
-# =========================
-
-def normalize_text(text):
-    if not text:
-        return ""
-
-    return (
-        text.replace("ي", "ی")
-        .replace("ك", "ک")
-        .replace("\u200c", " ")
-        .strip()
-    )
-
-
-# =========================
-# PARSE EPISODE
-# =========================
+# ==================================================
+# PARSE CAPTION
+# ==================================================
 
 def parse_caption(caption):
-    caption = normalize_text(caption)
 
-    series_name = None
-    episode_number = None
+    if not caption:
+        return None, None, "فایل"
+
+    caption = (
+        caption
+        .replace("ي", "ی")
+        .replace("ك", "ک")
+    )
+
+    series = None
+    episode = None
     file_type = "فایل"
 
-    lines = caption.splitlines()
+    for line in caption.splitlines():
 
-    for line in lines:
+        line = line.strip()
 
-        # سریال
         if "سریال" in line:
+
             if "«" in line and "»" in line:
+
                 try:
-                    series_name = line.split("«", 1)[1].split("»", 1)[0].strip()
+                    series = line.split("«", 1)[1].split("»", 1)[0].strip()
                 except:
                     pass
 
             elif ":" in line:
-                series_name = line.split(":", 1)[1].strip()
 
-        # قسمت
+                series = line.split(":", 1)[1].strip()
+
         if "قسمت" in line:
-            digits = ""
 
-            for ch in line:
-                if ch.isdigit():
-                    digits += ch
+            numbers = "".join(
+                c for c in line
+                if c.isdigit()
+            )
 
-            if digits:
-                episode_number = int(digits)
+            if numbers:
+                episode = int(numbers)
 
-        # نوع فایل
         if "زبان اصلی" in line:
             file_type = "زبان اصلی"
 
@@ -206,47 +274,44 @@ def parse_caption(caption):
         elif "زیرنویس فوری" in line:
             file_type = "زیرنویس فوری"
 
-    return series_name, episode_number, file_type
+    return series, episode, file_type
 
 
-# =========================
-# EPISODE DB
-# =========================
+# ==================================================
+# EPISODES
+# ==================================================
 
-def get_episode_by_code(start_code):
-    print("SEARCH START CODE:", repr(start_code))
+def get_episode_by_code(code):
 
-    result = supabase_request(
+    log("🔎 SEARCH CODE:", repr(code))
+
+    result = supabase(
         "GET",
         "episodes",
         {
             "select": "*",
-            "start_code": f"eq.{start_code}",
+            "start_code": f"eq.{code}",
             "limit": "1"
         }
     )
 
-    print("EPISODE RESULT:", result)
+    log("🔎 RESULT:", result)
 
     if result:
-        print(
-            "FOUND EPISODE:",
-            result[0].get("series_name"),
-            result[0].get("episode_number")
-        )
         return result[0]
 
     return None
 
 
-def get_episode(series_name, episode_number):
-    result = supabase_request(
+def get_episode(series, episode):
+
+    result = supabase(
         "GET",
         "episodes",
         {
             "select": "*",
-            "series_name": f"eq.{series_name}",
-            "episode_number": f"eq.{episode_number}",
+            "series_name": f"eq.{series}",
+            "episode_number": f"eq.{episode}",
             "limit": "1"
         }
     )
@@ -257,9 +322,12 @@ def get_episode(series_name, episode_number):
     return None
 
 
-def save_episode(series_name, episode_number, file_info):
+def save_episode(series, episode, file_info):
 
-    existing = get_episode(series_name, episode_number)
+    existing = get_episode(
+        series,
+        episode
+    )
 
     if existing:
 
@@ -267,7 +335,7 @@ def save_episode(series_name, episode_number, file_info):
 
         files.append(file_info)
 
-        supabase_request(
+        supabase(
             "PATCH",
             "episodes",
             {
@@ -280,37 +348,79 @@ def save_episode(series_name, episode_number, file_info):
 
         return existing.get("start_code")
 
-    start_code = generate_start_code()
+    code = generate_code()
 
-    episode_key = f"{series_name}__{episode_number}"
-
-    data = {
-        "episode_key": episode_key,
-        "series_name": series_name,
-        "episode_number": episode_number,
-        "start_code": start_code,
-        "files": [file_info]
+    body = {
+        "episode_key": f"{series}__{episode}",
+        "series_name": series,
+        "episode_number": episode,
+        "start_code": code,
+        "files": [
+            file_info
+        ]
     }
 
-    result = supabase_request(
+    result = supabase(
         "POST",
         "episodes",
-        json_data=data
+        body=body
     )
 
     if result:
-        return start_code
+        return code
 
     return None
 
 
-# =========================
+# ==================================================
+# SPONSORS
+# ==================================================
+
+def get_sponsors():
+
+    return supabase(
+        "GET",
+        "sponsors",
+        {
+            "select": "*",
+            "order": "id.asc"
+        }
+    )
+
+
+def add_sponsor(chat_id, title, url):
+
+    result = supabase(
+        "POST",
+        "sponsors",
+        body={
+            "chat_id": chat_id,
+            "title": title,
+            "url": url
+        }
+    )
+
+    return bool(result)
+
+
+def remove_sponsor(sponsor_id):
+
+    supabase(
+        "DELETE",
+        "sponsors",
+        {
+            "id": f"eq.{sponsor_id}"
+        }
+    )
+
+
+# ==================================================
 # PENDING
-# =========================
+# ==================================================
 
-def save_pending(user_id, start_code):
+def save_pending(user_id, code):
 
-    supabase_request(
+    supabase(
         "DELETE",
         "pending",
         {
@@ -318,19 +428,19 @@ def save_pending(user_id, start_code):
         }
     )
 
-    supabase_request(
+    supabase(
         "POST",
         "pending",
-        json_data={
+        body={
             "user_id": user_id,
-            "episode_key": start_code
+            "episode_key": code
         }
     )
 
 
 def get_pending(user_id):
 
-    result = supabase_request(
+    result = supabase(
         "GET",
         "pending",
         {
@@ -348,7 +458,7 @@ def get_pending(user_id):
 
 def delete_pending(user_id):
 
-    supabase_request(
+    supabase(
         "DELETE",
         "pending",
         {
@@ -357,57 +467,13 @@ def delete_pending(user_id):
     )
 
 
-# =========================
-# SPONSORS
-# =========================
-
-def get_sponsors():
-
-    return supabase_request(
-        "GET",
-        "sponsors",
-        {
-            "select": "*",
-            "order": "id.asc"
-        }
-    )
-
-
-def add_sponsor(chat_id, title, url):
-
-    result = supabase_request(
-        "POST",
-        "sponsors",
-        json_data={
-            "chat_id": chat_id,
-            "title": title,
-            "url": url
-        }
-    )
-
-    return bool(result)
-
-
-def remove_sponsor(sponsor_id):
-
-    result = supabase_request(
-        "DELETE",
-        "sponsors",
-        {
-            "id": f"eq.{sponsor_id}"
-        }
-    )
-
-    return True
-
-
-# =========================
+# ==================================================
 # MEMBERSHIP
-# =========================
+# ==================================================
 
 def is_member(chat_id, user_id):
 
-    result = tg(
+    result = telegram(
         "getChatMember",
         {
             "chat_id": chat_id,
@@ -427,10 +493,13 @@ def is_member(chat_id, user_id):
     ]
 
 
-def check_all_memberships(user_id):
+def check_memberships(user_id):
 
     # کانال اصلی
-    if not is_member(CHANNEL_ID, user_id):
+    if not is_member(
+        CHANNEL_ID,
+        user_id
+    ):
         return False
 
     # اسپانسرها
@@ -443,45 +512,50 @@ def check_all_memberships(user_id):
         if not chat_id:
             continue
 
-        if not is_member(chat_id, user_id):
+        if not is_member(
+            chat_id,
+            user_id
+        ):
             return False
 
     return True
 
 
-# =========================
-# JOIN KEYBOARD
-# =========================
+# ==================================================
+# KEYBOARDS
+# ==================================================
 
 def join_keyboard():
 
-    buttons = []
+    rows = []
 
-    # کانال اصلی
-    buttons.append([
+    rows.append([
         {
-            "text": "📢 عضویت در کانال اصلی",
+            "text": "📢 کانال اصلی",
             "url": CHANNEL_URL
         }
     ])
 
-    # اسپانسرها
     sponsors = get_sponsors()
 
     for sponsor in sponsors:
 
-        title = sponsor.get("title", "عضویت در کانال")
         url = sponsor.get("url")
+        title = sponsor.get(
+            "title",
+            "کانال اسپانسر"
+        )
 
         if url:
-            buttons.append([
+
+            rows.append([
                 {
                     "text": f"📢 {title}",
                     "url": url
                 }
             ])
 
-    buttons.append([
+    rows.append([
         {
             "text": "عضو شدم ✅",
             "callback_data": "check_join"
@@ -489,7 +563,7 @@ def join_keyboard():
     ])
 
     return {
-        "inline_keyboard": buttons
+        "inline_keyboard": rows
     }
 
 
@@ -507,9 +581,9 @@ def done_keyboard():
     }
 
 
-# =========================
-# SHOW JOIN
-# =========================
+# ==================================================
+# JOIN MESSAGE
+# ==================================================
 
 def show_join(chat_id):
 
@@ -517,18 +591,18 @@ def show_join(chat_id):
 
 بعد از عضویت روی «عضو شدم ✅» بزن."""
 
-    return send_message(
+    send_message(
         chat_id,
         text,
         join_keyboard()
     )
 
 
-# =========================
-# SHOW LAST 5 POSTS
-# =========================
+# ==================================================
+# LAST 5 POSTS MESSAGE
+# ==================================================
 
-def show_last_posts(chat_id):
+def show_done(chat_id):
 
     text = f"""❤️ برای دریافت فایل موردنظرت، ۵ پست آخر این کانال رو ری‌اکشن (❤️) بزن 👇
 
@@ -536,162 +610,194 @@ def show_last_posts(chat_id):
 
 بعد از انجامش روی «انجام شد ✅» بزن."""
 
-    return send_message(
+    send_message(
         chat_id,
         text,
         done_keyboard()
     )
 
 
-# =========================
-# SEND EPISODE
-# =========================
+# ==================================================
+# SEND FILES
+# ==================================================
 
 def send_episode(chat_id, episode):
 
     files = episode.get("files") or []
 
-    if not files:
-        send_message(
-            chat_id,
-            "❌ فایل این قسمت پیدا نشد."
-        )
-        return
+    log(
+        "📦 SENDING FILES:",
+        len(files)
+    )
 
-    sent_messages = []
+    sent = []
 
-    for file_info in files:
+    for item in files:
 
-        file_id = file_info.get("file_id")
-        file_type = file_info.get("file_type", "فایل")
-        caption = file_info.get("caption", "")
+        file_id = item.get("file_id")
 
         if not file_id:
             continue
 
-        text = caption
+        caption = item.get("caption", "")
 
-        if not text:
-            text = f"🎬 {file_type}"
+        file_type = item.get(
+            "type",
+            "video"
+        )
 
-        result = None
+        if file_type == "video":
 
-        if file_info.get("type") == "video":
-
-            result = tg(
+            result = telegram(
                 "sendVideo",
                 {
                     "chat_id": chat_id,
                     "video": file_id,
-                    "caption": text
+                    "caption": caption
                 }
             )
 
-        elif file_info.get("type") == "document":
+        else:
 
-            result = tg(
+            result = telegram(
                 "sendDocument",
                 {
                     "chat_id": chat_id,
                     "document": file_id,
-                    "caption": text
+                    "caption": caption
                 }
             )
 
-        if result and result.get("ok"):
+        if result.get("ok"):
 
-            sent_messages.append(
+            sent.append(
                 result["result"]["message_id"]
             )
 
-    # حذف بعد از 30 ثانیه
-    def delete_later():
+    def remove_later():
 
         time.sleep(DELETE_AFTER)
 
-        for message_id in sent_messages:
-            delete_message(chat_id, message_id)
+        for message_id in sent:
 
-    if sent_messages:
+            delete_message(
+                chat_id,
+                message_id
+            )
+
+    if sent:
+
         threading.Thread(
-            target=delete_later,
+            target=remove_later,
             daemon=True
         ).start()
 
 
-# =========================
-# START HANDLER
-# =========================
+# ==================================================
+# /START
+# ==================================================
 
 def handle_start(message):
 
-    chat = message.get("chat", {})
-    user = message.get("from", {})
+    chat_id = message["chat"]["id"]
 
-    chat_id = chat.get("id")
-    user_id = user.get("id")
+    user_id = message.get(
+        "from",
+        {}
+    ).get("id")
 
-    text = message.get("text", "")
+    text = message.get(
+        "text",
+        ""
+    )
 
-    print("START RECEIVED:", repr(text))
+    log("🚀 START:", repr(text))
 
-    parts = text.split(maxsplit=1)
+    parts = text.split(
+        maxsplit=1
+    )
 
-    if len(parts) < 2:
+    if len(parts) == 1:
 
         send_message(
             chat_id,
-            "سلام 👋\n\nبرای دریافت قسمت، لینک قسمت رو باز کن."
+            "سلام 👋\n\nلینک قسمت موردنظر رو باز کن."
         )
 
         return
 
-    start_code = parts[1].strip()
+    code = parts[1].strip()
 
-    print("START CODE:", repr(start_code))
+    log("🔑 CODE:", repr(code))
 
-    episode = get_episode_by_code(start_code)
+    episode = get_episode_by_code(code)
 
     if not episode:
 
         send_message(
             chat_id,
-            "❌ این لینک قسمت پیدا نشد یا منقضی شده."
+            "❌ این لینک قسمت پیدا نشد."
         )
 
         return
 
-    save_pending(user_id, start_code)
+    save_pending(
+        user_id,
+        code
+    )
 
-    if not check_all_memberships(user_id):
+    if not check_memberships(user_id):
 
         show_join(chat_id)
+
         return
 
-    show_last_posts(chat_id)
+    show_done(chat_id)
 
 
-# =========================
-# CALLBACK HANDLER
-# =========================
+# ==================================================
+# CALLBACK
+# ==================================================
 
 def handle_callback(callback):
 
-    callback_id = callback.get("id")
-    data = callback.get("data")
+    callback_id = callback["id"]
 
-    message = callback.get("message", {})
-    chat = message.get("chat", {})
-    user = callback.get("from", {})
+    data = callback.get(
+        "data",
+        ""
+    )
 
-    chat_id = chat.get("id")
-    user_id = user.get("id")
+    message = callback.get(
+        "message",
+        {}
+    )
 
-    print("CALLBACK:", data, user_id)
+    chat_id = message.get(
+        "chat",
+        {}
+    ).get("id")
+
+    user_id = callback.get(
+        "from",
+        {}
+    ).get("id")
+
+    log(
+        "🔘 CALLBACK:",
+        data,
+        user_id
+    )
+
+    # --------------------------
+    # CHECK JOIN
+    # --------------------------
 
     if data == "check_join":
 
-        if not check_all_memberships(user_id):
+        if not check_memberships(
+            user_id
+        ):
 
             answer_callback(
                 callback_id,
@@ -705,19 +811,30 @@ def handle_callback(callback):
             "✅ عضویت تأیید شد."
         )
 
-        # حذف پیام عضویت
-        message_id = message.get("message_id")
+        old_message_id = message.get(
+            "message_id"
+        )
 
-        if message_id:
-            delete_message(chat_id, message_id)
+        if old_message_id:
 
-        show_last_posts(chat_id)
+            delete_message(
+                chat_id,
+                old_message_id
+            )
+
+        show_done(chat_id)
 
         return
 
+    # --------------------------
+    # DONE
+    # --------------------------
+
     if data == "done":
 
-        pending = get_pending(user_id)
+        pending = get_pending(
+            user_id
+        )
 
         if not pending:
 
@@ -728,9 +845,13 @@ def handle_callback(callback):
 
             return
 
-        start_code = pending.get("episode_key")
+        code = pending.get(
+            "episode_key"
+        )
 
-        episode = get_episode_by_code(start_code)
+        episode = get_episode_by_code(
+            code
+        )
 
         if not episode:
 
@@ -743,51 +864,58 @@ def handle_callback(callback):
 
         answer_callback(
             callback_id,
-            "✅ در حال ارسال فایل..."
+            "✅ فایل در حال ارسال است..."
         )
 
-        delete_pending(user_id)
+        delete_pending(
+            user_id
+        )
 
-        message_id = message.get("message_id")
+        old_message_id = message.get(
+            "message_id"
+        )
 
-        if message_id:
-            delete_message(chat_id, message_id)
+        if old_message_id:
+
+            delete_message(
+                chat_id,
+                old_message_id
+            )
 
         send_episode(
             chat_id,
             episode
         )
 
-        return
 
-
-# =========================
-# ADMIN UPLOAD
-# =========================
+# ==================================================
+# ADMIN FILE
+# ==================================================
 
 def handle_admin_file(message):
 
-    user_id = message.get("from", {}).get("id")
+    user_id = message.get(
+        "from",
+        {}
+    ).get("id")
 
     if user_id != ADMIN_ID:
         return
 
-    caption = message.get("caption", "")
+    caption = message.get(
+        "caption",
+        ""
+    )
 
-    if not caption:
-        send_message(
-            message["chat"]["id"],
-            "❌ کپشن فایل وجود ندارد."
-        )
-        return
+    series, episode, file_type = parse_caption(
+        caption
+    )
 
-    series_name, episode_number, file_type = parse_caption(caption)
-
-    if not series_name or episode_number is None:
+    if not series or episode is None:
 
         send_message(
             message["chat"]["id"],
-            """❌ فرمت کپشن اشتباهه.
+            """❌ کپشن درست نیست.
 
 مثال:
 
@@ -812,12 +940,7 @@ def handle_admin_file(message):
         file_id = message["document"]["file_id"]
         file_kind = "document"
 
-    else:
-
-        send_message(
-            message["chat"]["id"],
-            "❌ فقط ویدیو یا فایل قابل قبول است."
-        )
+    if not file_id:
 
         return
 
@@ -828,13 +951,13 @@ def handle_admin_file(message):
         "caption": caption
     }
 
-    start_code = save_episode(
-        series_name,
-        episode_number,
+    code = save_episode(
+        series,
+        episode,
         file_info
     )
 
-    if not start_code:
+    if not code:
 
         send_message(
             message["chat"]["id"],
@@ -845,15 +968,15 @@ def handle_admin_file(message):
 
     link = (
         f"https://t.me/{BOT_USERNAME}"
-        f"?start={start_code}"
+        f"?start={code}"
     )
 
     send_message(
         message["chat"]["id"],
         f"""✅ فایل ذخیره شد.
 
-🎬 سریال: {series_name}
-🪷 قسمت: {episode_number}
+🎬 سریال: {series}
+🪷 قسمت: {episode}
 📁 نوع: {file_type}
 
 🔗 لینک دریافت:
@@ -862,24 +985,31 @@ def handle_admin_file(message):
     )
 
 
-# =========================
+# ==================================================
 # ADMIN COMMANDS
-# =========================
+# ==================================================
 
-def handle_admin_command(message):
+def admin_command(message):
 
-    user_id = message.get("from", {}).get("id")
+    user_id = message.get(
+        "from",
+        {}
+    ).get("id")
 
     if user_id != ADMIN_ID:
         return
 
-    text = message.get("text", "")
+    text = message.get(
+        "text",
+        ""
+    )
+
     chat_id = message["chat"]["id"]
 
-    # /testdb
+    # TEST DB
     if text == "/testdb":
 
-        result = supabase_request(
+        result = supabase(
             "GET",
             "episodes",
             {
@@ -895,7 +1025,7 @@ def handle_admin_command(message):
 
         return
 
-    # /sponsors
+    # SPONSORS
     if text == "/sponsors":
 
         sponsors = get_sponsors()
@@ -909,14 +1039,16 @@ def handle_admin_command(message):
 
             return
 
-        lines = ["📋 لیست اسپانسرها:\n"]
+        lines = [
+            "📋 لیست اسپانسرها:"
+        ]
 
         for s in sponsors:
 
             lines.append(
-                f"🆔 {s.get('id')}\n"
-                f"📢 {s.get('title')}\n"
-                f"🔗 {s.get('url')}\n"
+                f"\n🆔 {s.get('id')}"
+                f"\n📢 {s.get('title')}"
+                f"\n🔗 {s.get('url')}"
             )
 
         send_message(
@@ -926,8 +1058,57 @@ def handle_admin_command(message):
 
         return
 
-    # /remove_sponsor
-    if text.startswith("/remove_sponsor"):
+    # ADD SPONSOR
+    if text.startswith(
+        "/add_sponsor"
+    ):
+
+        content = text[
+            len("/add_sponsor"):
+        ].strip()
+
+        parts = [
+            x.strip()
+            for x in content.split("|")
+        ]
+
+        if len(parts) != 3:
+
+            send_message(
+                chat_id,
+                """❌ فرمت درست:
+
+/add_sponsor @channel | نام کانال | https://t.me/channel"""
+            )
+
+            return
+
+        ok = add_sponsor(
+            parts[0],
+            parts[1],
+            parts[2]
+        )
+
+        if ok:
+
+            send_message(
+                chat_id,
+                "✅ اسپانسر با موفقیت ذخیره شد."
+            )
+
+        else:
+
+            send_message(
+                chat_id,
+                "❌ ذخیره اسپانسر انجام نشد."
+            )
+
+        return
+
+    # REMOVE SPONSOR
+    if text.startswith(
+        "/remove_sponsor"
+    ):
 
         parts = text.split()
 
@@ -951,7 +1132,9 @@ def handle_admin_command(message):
 
             return
 
-        remove_sponsor(sponsor_id)
+        remove_sponsor(
+            sponsor_id
+        )
 
         send_message(
             chat_id,
@@ -960,55 +1143,14 @@ def handle_admin_command(message):
 
         return
 
-    # /add_sponsor
-    if text.startswith("/add_sponsor"):
+    # DELETE EPISODE
+    if text.startswith(
+        "/delete_episode"
+    ):
 
-        content = text[len("/add_sponsor"):].strip()
-
-        parts = [
-            x.strip()
-            for x in content.split("|")
-        ]
-
-        if len(parts) != 3:
-
-            send_message(
-                chat_id,
-                """❌ فرمت درست:
-
-/add_sponsor @channel | نام کانال | https://t.me/channel"""
-            )
-
-            return
-
-        sponsor_chat_id = parts[0]
-        title = parts[1]
-        url = parts[2]
-
-        if add_sponsor(
-            sponsor_chat_id,
-            title,
-            url
-        ):
-
-            send_message(
-                chat_id,
-                "✅ اسپانسر با موفقیت ذخیره شد."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-                "❌ ذخیره اسپانسر انجام نشد."
-            )
-
-        return
-
-    # /delete_episode
-    if text.startswith("/delete_episode"):
-
-        content = text[len("/delete_episode"):].strip()
+        content = text[
+            len("/delete_episode"):
+        ].strip()
 
         parts = [
             x.strip()
@@ -1026,10 +1168,10 @@ def handle_admin_command(message):
 
             return
 
-        series_name = parts[0]
+        series = parts[0]
 
         try:
-            episode_number = int(parts[1])
+            episode = int(parts[1])
         except:
 
             send_message(
@@ -1039,12 +1181,12 @@ def handle_admin_command(message):
 
             return
 
-        result = supabase_request(
+        supabase(
             "DELETE",
             "episodes",
             {
-                "series_name": f"eq.{series_name}",
-                "episode_number": f"eq.{episode_number}"
+                "series_name": f"eq.{series}",
+                "episode_number": f"eq.{episode}"
             }
         )
 
@@ -1055,10 +1197,10 @@ def handle_admin_command(message):
 
         return
 
-    # /delete_all
+    # DELETE ALL
     if text == "/delete_all":
 
-        supabase_request(
+        supabase(
             "DELETE",
             "episodes",
             {
@@ -1074,35 +1216,38 @@ def handle_admin_command(message):
         return
 
 
-# =========================
+# ==================================================
 # WEBHOOK
-# =========================
+# ==================================================
 
-@app.route("/webhook", methods=["POST"])
+@app.route(
+    "/webhook",
+    methods=["POST"]
+)
 def webhook():
 
     try:
 
         update = request.get_json(
-            force=True,
             silent=True
         )
 
-        print("================================")
-        print("UPDATE RECEIVED:")
-        print(json.dumps(
-            update,
-            ensure_ascii=False
-        ))
-        print("================================")
+        log(
+            "📩 WEBHOOK RECEIVED:",
+            bool(update)
+        )
 
         if not update:
+
+            log(
+                "⚠️ EMPTY UPDATE"
+            )
 
             return jsonify({
                 "ok": True
             })
 
-        # پیام
+        # MESSAGE
         if "message" in update:
 
             message = update["message"]
@@ -1117,13 +1262,13 @@ def webhook():
                 ""
             )
 
-            print(
-                "MESSAGE:",
+            log(
+                "📨 MESSAGE:",
                 user_id,
                 repr(text)
             )
 
-            # فایل ادمین
+            # ADMIN FILE
             if (
                 user_id == ADMIN_ID
                 and (
@@ -1132,26 +1277,41 @@ def webhook():
                 )
             ):
 
-                handle_admin_file(message)
+                handle_admin_file(
+                    message
+                )
 
-            # دستورات ادمین
+            # ADMIN COMMAND
             elif (
                 user_id == ADMIN_ID
                 and text.startswith("/")
             ):
 
-                handle_admin_command(message)
+                admin_command(
+                    message
+                )
 
-            # استارت
-            elif text.startswith("/start"):
+            # START
+            elif text.startswith(
+                "/start"
+            ):
 
-                handle_start(message)
+                handle_start(
+                    message
+                )
 
-        # callback
+        # CALLBACK
         elif "callback_query" in update:
 
             handle_callback(
                 update["callback_query"]
+            )
+
+        else:
+
+            log(
+                "ℹ️ OTHER UPDATE TYPE:",
+                list(update.keys())
             )
 
         return jsonify({
@@ -1160,8 +1320,8 @@ def webhook():
 
     except Exception as e:
 
-        print(
-            "WEBHOOK ERROR:",
+        log(
+            "🔥 WEBHOOK ERROR:",
             repr(e)
         )
 
@@ -1170,21 +1330,36 @@ def webhook():
         })
 
 
-# =========================
+# ==================================================
 # HOME
-# =========================
+# ==================================================
 
-@app.route("/", methods=["GET", "HEAD"])
+@app.route(
+    "/",
+    methods=["GET", "HEAD"]
+)
 def home():
 
     return "Bot is running.", 200
 
 
-# =========================
-# RUN
-# =========================
+# ==================================================
+# START
+# ==================================================
 
 if __name__ == "__main__":
+
+    log("==============================")
+    log("🚀 BOT STARTING...")
+    log("ADMIN:", ADMIN_ID)
+    log("SUPABASE:", SUPABASE_URL)
+    log("WEBHOOK:", WEBHOOK_URL)
+    log("==============================")
+
+    # تنظیم خودکار Webhook
+    if BOT_TOKEN:
+
+        setup_webhook()
 
     port = int(
         os.environ.get(
@@ -1192,10 +1367,6 @@ if __name__ == "__main__":
             10000
         )
     )
-
-    print("BOT STARTING...")
-    print("SUPABASE:", SUPABASE_URL)
-    print("ADMIN:", ADMIN_ID)
 
     app.run(
         host="0.0.0.0",
