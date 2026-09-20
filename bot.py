@@ -893,7 +893,6 @@ def handle_admin_command(chat_id, user_id, text):
 
     if text.startswith("/add_sponsor"):
 
-    if text.startswith("/add_sponsor"):
         raw = text[len("/add_sponsor"):].strip()
 
         parts = [x.strip() for x in raw.split("|")]
