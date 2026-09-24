@@ -44,21 +44,53 @@ CACHE_LOCK = threading.Lock()
 # =========================
 
 def telegram(method, data=None):
+
+    started = time.time()
+
     try:
+
         r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
             json=data or {},
             timeout=20
         )
 
-        return r.json()
+        result = r.json()
+
+        elapsed = time.time() - started
+
+        # فقط برای بررسی سرعت
+        if method in [
+            "getChatMember",
+            "sendMessage",
+            "sendVideo",
+            "sendDocument"
+        ]:
+
+            print(
+                f"[TELEGRAM] {method}: "
+                f"{elapsed:.3f}s"
+            )
+
+        return result
 
     except Exception as e:
-        print("Telegram error:", e)
-        return {"ok": False}
+
+        print(
+            f"Telegram error ({method}):",
+            e
+        )
+
+        return {
+            "ok": False
+        }
 
 
-def send_message(chat_id, text, keyboard=None):
+def send_message(
+    chat_id,
+    text,
+    keyboard=None
+):
 
     data = {
         "chat_id": chat_id,
@@ -69,10 +101,16 @@ def send_message(chat_id, text, keyboard=None):
     if keyboard:
         data["reply_markup"] = keyboard
 
-    return telegram("sendMessage", data)
+    return telegram(
+        "sendMessage",
+        data
+    )
 
 
-def delete_message(chat_id, message_id):
+def delete_message(
+    chat_id,
+    message_id
+):
 
     return telegram(
         "deleteMessage",
@@ -87,7 +125,12 @@ def delete_message(chat_id, message_id):
 # SUPABASE
 # =========================
 
-def db_get(table, params=None):
+def db_get(
+    table,
+    params=None
+):
+
+    started = time.time()
 
     try:
 
@@ -98,19 +141,41 @@ def db_get(table, params=None):
             timeout=20
         )
 
+        elapsed = time.time() - started
+
+        print(
+            f"[SUPABASE GET] {table}: "
+            f"{elapsed:.3f}s"
+        )
+
         if r.status_code != 200:
-            print("DB GET:", r.status_code, r.text)
+
+            print(
+                "DB GET:",
+                r.status_code,
+                r.text
+            )
+
             return []
 
         return r.json()
 
     except Exception as e:
 
-        print("DB GET ERROR:", e)
+        print(
+            "DB GET ERROR:",
+            e
+        )
+
         return []
 
 
-def db_insert(table, data):
+def db_insert(
+    table,
+    data
+):
+
+    started = time.time()
 
     try:
 
@@ -124,20 +189,42 @@ def db_insert(table, data):
             timeout=20
         )
 
+        elapsed = time.time() - started
+
+        print(
+            f"[SUPABASE INSERT] {table}: "
+            f"{elapsed:.3f}s"
+        )
+
         if r.status_code in [200, 201]:
+
             return r.json()
 
-        print("DB INSERT:", r.status_code, r.text)
+        print(
+            "DB INSERT:",
+            r.status_code,
+            r.text
+        )
 
         return None
 
     except Exception as e:
 
-        print("DB INSERT ERROR:", e)
+        print(
+            "DB INSERT ERROR:",
+            e
+        )
+
         return None
 
 
-def db_patch(table, params, data):
+def db_patch(
+    table,
+    params,
+    data
+):
+
+    started = time.time()
 
     try:
 
@@ -152,18 +239,42 @@ def db_patch(table, params, data):
             timeout=20
         )
 
-        if r.status_code not in [200, 204]:
-            print("DB PATCH:", r.status_code, r.text)
+        elapsed = time.time() - started
 
-        return r.status_code in [200, 204]
+        print(
+            f"[SUPABASE PATCH] {table}: "
+            f"{elapsed:.3f}s"
+        )
+
+        if r.status_code not in [200, 204]:
+
+            print(
+                "DB PATCH:",
+                r.status_code,
+                r.text
+            )
+
+        return r.status_code in [
+            200,
+            204
+        ]
 
     except Exception as e:
 
-        print("DB PATCH ERROR:", e)
+        print(
+            "DB PATCH ERROR:",
+            e
+        )
+
         return False
 
 
-def db_delete(table, params):
+def db_delete(
+    table,
+    params
+):
+
+    started = time.time()
 
     try:
 
@@ -174,11 +285,25 @@ def db_delete(table, params):
             timeout=20
         )
 
-        return r.status_code in [200, 204]
+        elapsed = time.time() - started
+
+        print(
+            f"[SUPABASE DELETE] {table}: "
+            f"{elapsed:.3f}s"
+        )
+
+        return r.status_code in [
+            200,
+            204
+        ]
 
     except Exception as e:
 
-        print("DB DELETE ERROR:", e)
+        print(
+            "DB DELETE ERROR:",
+            e
+        )
+
         return False
 
 
@@ -186,24 +311,31 @@ def db_delete(table, params):
 # USER STATISTICS
 # =========================
 
-def track_user(user_id):
+def track_user(
+    user_id
+):
 
     if not user_id:
         return
 
-    # ادمین داخل آمار کاربران حساب نشود
     if user_id == ADMIN_ID:
         return
 
+    started = time.time()
+
     try:
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(
+            timezone.utc
+        ).isoformat()
 
         r = requests.post(
             f"{SUPABASE_URL}/rest/v1/users",
             headers={
                 **HEADERS,
-                "Prefer": "resolution=merge-duplicates,return=minimal"
+                "Prefer":
+                    "resolution=merge-duplicates,"
+                    "return=minimal"
             },
             json={
                 "user_id": user_id,
@@ -212,15 +344,37 @@ def track_user(user_id):
             timeout=20
         )
 
-        if r.status_code not in [200, 201, 204]:
-            print("TRACK USER:", r.status_code, r.text)
+        elapsed = time.time() - started
+
+        print(
+            f"[TRACK_USER] "
+            f"{elapsed:.3f}s"
+        )
+
+        if r.status_code not in [
+            200,
+            201,
+            204
+        ]:
+
+            print(
+                "TRACK USER:",
+                r.status_code,
+                r.text
+            )
 
     except Exception as e:
 
-        print("TRACK USER ERROR:", e)
+        print(
+            "TRACK USER ERROR:",
+            e
+        )
 
 
-def db_count(table, params=None):
+def db_count(
+    table,
+    params=None
+):
 
     try:
 
@@ -242,30 +396,53 @@ def db_count(table, params=None):
             timeout=20
         )
 
-        if r.status_code not in [200, 206]:
-            print("DB COUNT:", r.status_code, r.text)
+        if r.status_code not in [
+            200,
+            206
+        ]:
+
+            print(
+                "DB COUNT:",
+                r.status_code,
+                r.text
+            )
+
             return 0
 
-        content_range = r.headers.get("Content-Range", "")
+        content_range = r.headers.get(
+            "Content-Range",
+            ""
+        )
 
         if "/" in content_range:
 
-            total = content_range.split("/")[-1]
+            total = content_range.split(
+                "/"
+            )[-1]
 
             if total != "*":
+
                 return int(total)
 
-        return len(r.json())
+        return len(
+            r.json()
+        )
 
     except Exception as e:
 
-        print("DB COUNT ERROR:", e)
+        print(
+            "DB COUNT ERROR:",
+            e
+        )
+
         return 0
 
 
 def get_stats():
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     today_start = now.replace(
         hour=0,
@@ -289,21 +466,24 @@ def get_stats():
     today_users = db_count(
         "users",
         {
-            "last_seen": f"gte.{today_start.isoformat()}"
+            "last_seen":
+                f"gte.{today_start.isoformat()}"
         }
     )
 
     monthly_users = db_count(
         "users",
         {
-            "last_seen": f"gte.{month_start.isoformat()}"
+            "last_seen":
+                f"gte.{month_start.isoformat()}"
         }
     )
 
     new_month_users = db_count(
         "users",
         {
-            "first_seen": f"gte.{month_start.isoformat()}"
+            "first_seen":
+                f"gte.{month_start.isoformat()}"
         }
     )
 
@@ -323,6 +503,8 @@ def refresh_episodes_cache():
 
     global EPISODES_CACHE
 
+    started = time.time()
+
     rows = db_get(
         "episodes",
         {
@@ -334,6 +516,11 @@ def refresh_episodes_cache():
     with CACHE_LOCK:
         EPISODES_CACHE = rows
 
+    print(
+        f"[CACHE] refresh episodes: "
+        f"{time.time() - started:.3f}s"
+    )
+
     return rows
 
 
@@ -344,6 +531,7 @@ def get_episodes():
     with CACHE_LOCK:
 
         if EPISODES_CACHE is not None:
+
             return EPISODES_CACHE
 
     return refresh_episodes_cache()
@@ -378,6 +566,7 @@ def get_sponsors():
     with CACHE_LOCK:
 
         if SPONSORS_CACHE is not None:
+
             return SPONSORS_CACHE
 
     return refresh_sponsors_cache()
@@ -387,9 +576,14 @@ def get_sponsors():
 # CODES
 # =========================
 
-def random_code(length=6):
+def random_code(
+    length=6
+):
 
-    chars = string.ascii_letters + string.digits
+    chars = (
+        string.ascii_letters +
+        string.digits
+    )
 
     return "".join(
         random.choice(chars)
@@ -403,16 +597,28 @@ def all_used_codes():
 
     for episode in get_episodes():
 
-        if episode.get("start_code"):
+        if episode.get(
+            "start_code"
+        ):
+
             codes.add(
                 episode["start_code"]
             )
 
-        for item in episode.get("files") or []:
+        for item in (
+            episode.get("files")
+            or []
+        ):
 
-            if isinstance(item, dict):
+            if isinstance(
+                item,
+                dict
+            ):
 
-                if item.get("type_code"):
+                if item.get(
+                    "type_code"
+                ):
+
                     codes.add(
                         item["type_code"]
                     )
@@ -429,6 +635,7 @@ def unique_code():
         code = random_code()
 
         if code not in used:
+
             return code
 
 
@@ -436,50 +643,82 @@ def unique_code():
 # EPISODE FUNCTIONS
 # =========================
 
-def get_episode_by_key(key):
+def get_episode_by_key(
+    key
+):
 
     for episode in get_episodes():
 
-        if episode.get("episode_key") == key:
+        if episode.get(
+            "episode_key"
+        ) == key:
+
             return episode
 
     return None
 
 
-def get_episode_by_type_code(code):
+def get_episode_by_type_code(
+    code
+):
 
     for episode in get_episodes():
 
-        if episode.get("start_code") == code:
+        if episode.get(
+            "start_code"
+        ) == code:
+
             return episode, None
 
-        for item in episode.get("files") or []:
+        for item in (
+            episode.get("files")
+            or []
+        ):
 
-            if not isinstance(item, dict):
+            if not isinstance(
+                item,
+                dict
+            ):
+
                 continue
 
-            if item.get("type_code") == code:
+            if item.get(
+                "type_code"
+            ) == code:
 
-                return episode, item.get(
-                    "file_type",
-                    "نامشخص"
+                return (
+                    episode,
+                    item.get(
+                        "file_type",
+                        "نامشخص"
+                    )
                 )
 
     return None, None
 
 
-def ensure_type_codes(episode):
+def ensure_type_codes(
+    episode
+):
 
-    files = episode.get("files") or []
+    files = (
+        episode.get("files")
+        or []
+    )
 
     if not files:
+
         return episode
 
     groups = {}
 
     for item in files:
 
-        if not isinstance(item, dict):
+        if not isinstance(
+            item,
+            dict
+        ):
+
             continue
 
         file_type = item.get(
@@ -488,15 +727,23 @@ def ensure_type_codes(episode):
         )
 
         if file_type not in groups:
+
             groups[file_type] = []
 
-        groups[file_type].append(item)
+        groups[file_type].append(
+            item
+        )
 
     used = all_used_codes()
 
-    if episode.get("start_code") in used:
+    if episode.get(
+        "start_code"
+    ) in used:
+
         used.discard(
-            episode.get("start_code")
+            episode.get(
+                "start_code"
+            )
         )
 
     changed = False
@@ -507,11 +754,14 @@ def ensure_type_codes(episode):
 
         for item in items:
 
-            old_code = item.get("type_code")
+            old_code = item.get(
+                "type_code"
+            )
 
             if old_code:
 
                 existing_code = old_code
+
                 break
 
         if not existing_code:
@@ -521,15 +771,23 @@ def ensure_type_codes(episode):
                 existing_code = random_code()
 
                 if existing_code not in used:
+
                     break
 
-            used.add(existing_code)
+            used.add(
+                existing_code
+            )
 
         for item in items:
 
-            if item.get("type_code") != existing_code:
+            if item.get(
+                "type_code"
+            ) != existing_code:
 
-                item["type_code"] = existing_code
+                item["type_code"] = (
+                    existing_code
+                )
+
                 changed = True
 
     if changed:
@@ -537,7 +795,8 @@ def ensure_type_codes(episode):
         db_patch(
             "episodes",
             {
-                "id": f"eq.{episode['id']}"
+                "id":
+                    f"eq.{episode['id']}"
             },
             {
                 "files": files
@@ -549,7 +808,9 @@ def ensure_type_codes(episode):
     return episode
 
 
-def get_type_links(episode):
+def get_type_links(
+    episode
+):
 
     episode = ensure_type_codes(
         episode
@@ -557,9 +818,16 @@ def get_type_links(episode):
 
     links = {}
 
-    for item in episode.get("files") or []:
+    for item in (
+        episode.get("files")
+        or []
+    ):
 
-        if not isinstance(item, dict):
+        if not isinstance(
+            item,
+            dict
+        ):
+
             continue
 
         file_type = item.get(
@@ -567,7 +835,9 @@ def get_type_links(episode):
             "نامشخص"
         )
 
-        code = item.get("type_code")
+        code = item.get(
+            "type_code"
+        )
 
         if code and file_type not in links:
 
@@ -586,12 +856,18 @@ def set_pending(
     file_type
 ):
 
-    value = f"{episode_key}|||{file_type}"
+    started = time.time()
+
+    value = (
+        f"{episode_key}|||"
+        f"{file_type}"
+    )
 
     old = db_get(
         "pending",
         {
-            "user_id": f"eq.{user_id}",
+            "user_id":
+                f"eq.{user_id}",
             "limit": "1"
         }
     )
@@ -601,10 +877,12 @@ def set_pending(
         db_patch(
             "pending",
             {
-                "user_id": f"eq.{user_id}"
+                "user_id":
+                    f"eq.{user_id}"
             },
             {
-                "episode_key": value
+                "episode_key":
+                    value
             }
         )
 
@@ -613,31 +891,48 @@ def set_pending(
         db_insert(
             "pending",
             {
-                "user_id": user_id,
-                "episode_key": value
+                "user_id":
+                    user_id,
+                "episode_key":
+                    value
             }
         )
 
+    print(
+        f"[PENDING] total: "
+        f"{time.time() - started:.3f}s"
+    )
 
-def get_pending(user_id):
+
+def get_pending(
+    user_id
+):
 
     rows = db_get(
         "pending",
         {
-            "user_id": f"eq.{user_id}",
+            "user_id":
+                f"eq.{user_id}",
             "limit": "1"
         }
     )
 
-    return rows[0] if rows else None
+    return (
+        rows[0]
+        if rows
+        else None
+    )
 
 
-def delete_pending(user_id):
+def delete_pending(
+    user_id
+):
 
     db_delete(
         "pending",
         {
-            "user_id": f"eq.{user_id}"
+            "user_id":
+                f"eq.{user_id}"
         }
     )
 
@@ -666,12 +961,15 @@ def add_sponsor(
     return result
 
 
-def remove_sponsor(sponsor_id):
+def remove_sponsor(
+    sponsor_id
+):
 
     result = db_delete(
         "sponsors",
         {
-            "id": f"eq.{sponsor_id}"
+            "id":
+                f"eq.{sponsor_id}"
         }
     )
 
@@ -689,6 +987,8 @@ def check_channel(
     user_id
 ):
 
+    started = time.time()
+
     result = telegram(
         "getChatMember",
         {
@@ -697,10 +997,23 @@ def check_channel(
         }
     )
 
-    if not result.get("ok"):
+    elapsed = time.time() - started
+
+    print(
+        f"[MEMBERSHIP] "
+        f"{channel}: "
+        f"{elapsed:.3f}s"
+    )
+
+    if not result.get(
+        "ok"
+    ):
+
         return False
 
-    status = result["result"].get(
+    status = result[
+        "result"
+    ].get(
         "status"
     )
 
@@ -711,7 +1024,11 @@ def check_channel(
     ]
 
 
-def all_channels_joined(user_id):
+def all_channels_joined(
+    user_id
+):
+
+    started = time.time()
 
     channels = [
         CHANNEL_ID
@@ -724,6 +1041,7 @@ def all_channels_joined(user_id):
         )
 
     if not channels:
+
         return True
 
     with ThreadPoolExecutor(
@@ -735,26 +1053,40 @@ def all_channels_joined(user_id):
 
         results = list(
             executor.map(
-                lambda ch: check_channel(
-                    ch,
-                    user_id
-                ),
+                lambda ch:
+                    check_channel(
+                        ch,
+                        user_id
+                    ),
                 channels
             )
         )
 
-    return all(results)
+    elapsed = time.time() - started
+
+    print(
+        f"[MEMBERSHIP TOTAL] "
+        f"{elapsed:.3f}s"
+    )
+
+    return all(
+        results
+    )
 
 
-def show_join_message(chat_id):
+def show_join_message(
+    chat_id
+):
 
     buttons = []
 
     buttons.append(
         [
             {
-                "text": "📢 کانال اصلی",
-                "url": CHANNEL_URL
+                "text":
+                    "📢 کانال اصلی",
+                "url":
+                    CHANNEL_URL
             }
         ]
     )
@@ -764,8 +1096,10 @@ def show_join_message(chat_id):
         buttons.append(
             [
                 {
-                    "text": sponsor["title"],
-                    "url": sponsor["url"]
+                    "text":
+                        sponsor["title"],
+                    "url":
+                        sponsor["url"]
                 }
             ]
         )
@@ -773,8 +1107,10 @@ def show_join_message(chat_id):
     buttons.append(
         [
             {
-                "text": "عضو شدم ✅",
-                "callback_data": "check_join"
+                "text":
+                    "عضو شدم ✅",
+                "callback_data":
+                    "check_join"
             }
         ]
     )
@@ -787,12 +1123,15 @@ def show_join_message(chat_id):
         "2️⃣سپس رو دکمه عضو شدم کلیک کنید",
 
         {
-            "inline_keyboard": buttons
+            "inline_keyboard":
+                buttons
         }
     )
 
 
-def show_posts_message(chat_id):
+def show_posts_message(
+    chat_id
+):
 
     return send_message(
         chat_id,
@@ -806,15 +1145,19 @@ def show_posts_message(chat_id):
 
                 [
                     {
-                        "text": "📢 رفتن به کانال",
-                        "url": CHANNEL_URL
+                        "text":
+                            "📢 رفتن به کانال",
+                        "url":
+                            CHANNEL_URL
                     }
                 ],
 
                 [
                     {
-                        "text": "انجام دادم ✅",
-                        "callback_data": "done_posts"
+                        "text":
+                            "انجام دادم ✅",
+                        "callback_data":
+                            "done_posts"
                     }
                 ]
 
@@ -845,9 +1188,12 @@ def send_file(
     item
 ):
 
-    file_id = item.get("file_id")
+    file_id = item.get(
+        "file_id"
+    )
 
     if not file_id:
+
         return None
 
     telegram_type = item.get(
@@ -865,9 +1211,12 @@ def send_file(
         result = telegram(
             "sendDocument",
             {
-                "chat_id": chat_id,
-                "document": file_id,
-                "caption": caption
+                "chat_id":
+                    chat_id,
+                "document":
+                    file_id,
+                "caption":
+                    caption
             }
         )
 
@@ -876,14 +1225,20 @@ def send_file(
         result = telegram(
             "sendVideo",
             {
-                "chat_id": chat_id,
-                "video": file_id,
-                "caption": caption,
-                "supports_streaming": True
+                "chat_id":
+                    chat_id,
+                "video":
+                    file_id,
+                "caption":
+                    caption,
+                "supports_streaming":
+                    True
             }
         )
 
-    if result.get("ok"):
+    if result.get(
+        "ok"
+    ):
 
         message_id = result[
             "result"
@@ -909,9 +1264,16 @@ def send_selected_type(
 
     selected = []
 
-    for item in episode.get("files") or []:
+    for item in (
+        episode.get("files")
+        or []
+    ):
 
-        if not isinstance(item, dict):
+        if not isinstance(
+            item,
+            dict
+        ):
+
             continue
 
         if item.get(
@@ -919,7 +1281,9 @@ def send_selected_type(
             "نامشخص"
         ) == file_type:
 
-            selected.append(item)
+            selected.append(
+                item
+            )
 
     if not selected:
 
@@ -1017,17 +1381,22 @@ def save_episode(
     )
 
     new_file = {
-        "file_id": file_id,
-        "type": telegram_type,
-        "file_type": file_type,
-        "caption": caption
+        "file_id":
+            file_id,
+        "type":
+            telegram_type,
+        "file_type":
+            file_type,
+        "caption":
+            caption
     }
 
     if episode:
 
-        files = episode.get(
-            "files"
-        ) or []
+        files = (
+            episode.get("files")
+            or []
+        )
 
         files.append(
             new_file
@@ -1042,10 +1411,12 @@ def save_episode(
         db_patch(
             "episodes",
             {
-                "id": f"eq.{episode['id']}"
+                "id":
+                    f"eq.{episode['id']}"
             },
             {
-                "files": episode["files"]
+                "files":
+                    episode["files"]
             }
         )
 
@@ -1055,14 +1426,21 @@ def save_episode(
 
     start_code = unique_code()
 
-    new_file["type_code"] = unique_code()
+    new_file[
+        "type_code"
+    ] = unique_code()
 
     data = {
-        "episode_key": key,
-        "series_name": series,
-        "episode_number": episode_number,
-        "files": [new_file],
-        "start_code": start_code
+        "episode_key":
+            key,
+        "series_name":
+            series,
+        "episode_number":
+            episode_number,
+        "files":
+            [new_file],
+        "start_code":
+            start_code
     }
 
     result = db_insert(
@@ -1096,7 +1474,8 @@ def delete_episode(
     result = db_delete(
         "episodes",
         {
-            "episode_key": f"eq.{key}"
+            "episode_key":
+                f"eq.{key}"
         }
     )
 
@@ -1110,7 +1489,8 @@ def delete_all():
     result = db_delete(
         "episodes",
         {
-            "id": "gt.0"
+            "id":
+                "gt.0"
         }
     )
 
@@ -1123,9 +1503,12 @@ def delete_all():
 # CAPTION PARSER
 # =========================
 
-def parse_caption(caption):
+def parse_caption(
+    caption
+):
 
     if not caption:
+
         return None
 
     episode_match = re.search(
@@ -1134,6 +1517,7 @@ def parse_caption(caption):
     )
 
     if not episode_match:
+
         return None
 
     episode_number = int(
@@ -1157,6 +1541,7 @@ def parse_caption(caption):
             break
 
     if not series:
+
         return None
 
     if "زبان اصلی" in caption:
@@ -1186,10 +1571,15 @@ def parse_caption(caption):
 # MESSAGE HANDLER
 # =========================
 
-def handle_message(message):
+def handle_message(
+    message
+):
 
     if not message:
+
         return
+
+    total_started = time.time()
 
     chat_id = message.get(
         "chat",
@@ -1206,15 +1596,31 @@ def handle_message(message):
         ""
     )
 
-    # ثبت کاربر
-    track_user(user_id)
+    # =====================
+    # USER TRACKING
+    # =====================
 
+    t = time.time()
+
+    track_user(
+        user_id
+    )
+
+    print(
+        f"[START FLOW] "
+        f"track_user: "
+        f"{time.time() - t:.3f}s"
+    )
 
     # =====================
     # START
     # =====================
 
-    if text.startswith("/start"):
+    if text.startswith(
+        "/start"
+    ):
+
+        start_time = time.time()
 
         parts = text.split(
             maxsplit=1
@@ -1227,14 +1633,32 @@ def handle_message(message):
                 "سلام 👋"
             )
 
+            print(
+                f"[START FLOW] "
+                f"TOTAL: "
+                f"{time.time() - total_started:.3f}s"
+            )
+
             return
 
         code = parts[1].strip()
+
+        # -----------------
+        # EPISODE
+        # -----------------
+
+        t = time.time()
 
         episode, file_type = (
             get_episode_by_type_code(
                 code
             )
+        )
+
+        print(
+            f"[START FLOW] "
+            f"get_episode: "
+            f"{time.time() - t:.3f}s"
         )
 
         if not episode:
@@ -1244,14 +1668,39 @@ def handle_message(message):
                 "❌ لینک فایل معتبر نیست یا قسمت پیدا نشد."
             )
 
+            print(
+                f"[START FLOW] "
+                f"TOTAL: "
+                f"{time.time() - total_started:.3f}s"
+            )
+
             return
+
+        # -----------------
+        # TYPE CODES
+        # -----------------
+
+        t = time.time()
 
         episode = ensure_type_codes(
             episode
         )
 
+        print(
+            f"[START FLOW] "
+            f"ensure_codes: "
+            f"{time.time() - t:.3f}s"
+        )
+
         if not file_type:
+
             file_type = "همه"
+
+        # -----------------
+        # PENDING
+        # -----------------
+
+        t = time.time()
 
         set_pending(
             user_id,
@@ -1259,9 +1708,35 @@ def handle_message(message):
             file_type
         )
 
-        if all_channels_joined(
+        print(
+            f"[START FLOW] "
+            f"set_pending: "
+            f"{time.time() - t:.3f}s"
+        )
+
+        # -----------------
+        # MEMBERSHIP
+        # -----------------
+
+        t = time.time()
+
+        joined = all_channels_joined(
             user_id
-        ):
+        )
+
+        print(
+            f"[START FLOW] "
+            f"membership: "
+            f"{time.time() - t:.3f}s"
+        )
+
+        # -----------------
+        # SHOW MESSAGE
+        # -----------------
+
+        t = time.time()
+
+        if joined:
 
             show_posts_message(
                 chat_id
@@ -1273,8 +1748,19 @@ def handle_message(message):
                 chat_id
             )
 
-        return
+        print(
+            f"[START FLOW] "
+            f"send_message: "
+            f"{time.time() - t:.3f}s"
+        )
 
+        print(
+            f"[START FLOW] "
+            f"TOTAL: "
+            f"{time.time() - total_started:.3f}s"
+        )
+
+        return
 
     # =====================
     # ADMIN COMMANDS
@@ -1282,8 +1768,6 @@ def handle_message(message):
 
     if user_id == ADMIN_ID:
 
-
-        # TEST DATABASE
         if text == "/testdb":
 
             result = db_get(
@@ -1303,11 +1787,6 @@ def handle_message(message):
 
             return
 
-
-        # =================
-        # STATS
-        # =================
-
         if text == "/stats":
 
             (
@@ -1322,7 +1801,8 @@ def handle_message(message):
             )
 
             month_name = (
-                f"{now.year}/{now.month:02d}"
+                f"{now.year}/"
+                f"{now.month:02d}"
             )
 
             text_stats = (
@@ -1349,11 +1829,6 @@ def handle_message(message):
             )
 
             return
-
-
-        # =================
-        # SPONSORS
-        # =================
 
         if text == "/sponsors":
 
@@ -1386,11 +1861,6 @@ def handle_message(message):
             )
 
             return
-
-
-        # =================
-        # REMOVE SPONSOR
-        # =================
 
         if text.startswith(
             "/remove_sponsor"
@@ -1440,11 +1910,6 @@ def handle_message(message):
 
             return
 
-
-        # =================
-        # ADD SPONSOR
-        # =================
-
         if text.startswith(
             "/add_sponsor"
         ):
@@ -1490,11 +1955,6 @@ def handle_message(message):
                 )
 
             return
-
-
-        # =================
-        # DELETE EPISODE
-        # =================
 
         if text.startswith(
             "/delete_episode"
@@ -1556,11 +2016,6 @@ def handle_message(message):
 
             return
 
-
-        # =================
-        # DELETE ALL
-        # =================
-
         if text == "/delete_all":
 
             delete_all()
@@ -1571,7 +2026,6 @@ def handle_message(message):
             )
 
             return
-
 
     # =====================
     # ADMIN FILE UPLOAD
@@ -1672,7 +2126,9 @@ def handle_message(message):
 # CALLBACK HANDLER
 # =========================
 
-def handle_callback(callback):
+def handle_callback(
+    callback
+):
 
     data = callback.get(
         "data",
@@ -1684,13 +2140,24 @@ def handle_callback(callback):
     ]["id"]
 
     # ثبت فعالیت کاربر
-    track_user(user_id)
+    t = time.time()
+
+    track_user(
+        user_id
+    )
+
+    print(
+        f"[CALLBACK] "
+        f"track_user: "
+        f"{time.time() - t:.3f}s"
+    )
 
     message = callback.get(
         "message"
     )
 
     if not message:
+
         return
 
     chat_id = message[
@@ -1700,7 +2167,6 @@ def handle_callback(callback):
     message_id = message[
         "message_id"
     ]
-
 
     # =====================
     # CHECK JOIN
@@ -1719,9 +2185,19 @@ def handle_callback(callback):
             }
         )
 
-        if not all_channels_joined(
+        t = time.time()
+
+        joined = all_channels_joined(
             user_id
-        ):
+        )
+
+        print(
+            f"[CALLBACK] "
+            f"membership: "
+            f"{time.time() - t:.3f}s"
+        )
+
+        if not joined:
 
             telegram(
                 "answerCallbackQuery",
@@ -1761,7 +2237,6 @@ def handle_callback(callback):
 
         return
 
-
     # =====================
     # DONE POSTS
     # =====================
@@ -1779,8 +2254,18 @@ def handle_callback(callback):
             }
         )
 
+        total_started = time.time()
+
+        t = time.time()
+
         pending = get_pending(
             user_id
+        )
+
+        print(
+            f"[CALLBACK] "
+            f"get_pending: "
+            f"{time.time() - t:.3f}s"
         )
 
         if not pending:
@@ -1801,9 +2286,19 @@ def handle_callback(callback):
 
             return
 
-        if not all_channels_joined(
+        t = time.time()
+
+        joined = all_channels_joined(
             user_id
-        ):
+        )
+
+        print(
+            f"[CALLBACK] "
+            f"membership: "
+            f"{time.time() - t:.3f}s"
+        )
+
+        if not joined:
 
             telegram(
                 "answerCallbackQuery",
@@ -1841,8 +2336,16 @@ def handle_callback(callback):
             episode_key = stored
             file_type = "همه"
 
+        t = time.time()
+
         episode = get_episode_by_key(
             episode_key
+        )
+
+        print(
+            f"[CALLBACK] "
+            f"get_episode: "
+            f"{time.time() - t:.3f}s"
         )
 
         if not episode:
@@ -1876,14 +2379,16 @@ def handle_callback(callback):
 
             types = []
 
-            for item in episode.get(
-                "files"
-            ) or []:
+            for item in (
+                episode.get("files")
+                or []
+            ):
 
                 if not isinstance(
                     item,
                     dict
                 ):
+
                     continue
 
                 ft = item.get(
@@ -1892,7 +2397,10 @@ def handle_callback(callback):
                 )
 
                 if ft not in types:
-                    types.append(ft)
+
+                    types.append(
+                        ft
+                    )
 
             for ft in types:
 
@@ -1909,6 +2417,12 @@ def handle_callback(callback):
                 episode,
                 file_type
             )
+
+        print(
+            f"[CALLBACK] "
+            f"DONE TOTAL: "
+            f"{time.time() - total_started:.3f}s"
+        )
 
         return
 
@@ -1939,6 +2453,7 @@ def webhook():
         )
 
         if not update:
+
             return "OK"
 
         if "message" in update:
@@ -1972,7 +2487,8 @@ def setup_webhook():
     result = telegram(
         "setWebhook",
         {
-            "url": WEBHOOK_URL,
+            "url":
+                WEBHOOK_URL,
 
             "allowed_updates": [
                 "message",
@@ -1980,7 +2496,8 @@ def setup_webhook():
                 "callback_query"
             ],
 
-            "max_connections": 40
+            "max_connections":
+                40
         }
     )
 
