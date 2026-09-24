@@ -29,6 +29,9 @@ BOT_USERNAME = "Seryyaltorki_bot"
 
 DELETE_AFTER = 30
 
+# هر چند دقیقه یک بار سرویس خودش را Ping می‌کند
+KEEP_ALIVE_INTERVAL = 5 * 60
+
 app = Flask(__name__)
 
 
@@ -44,7 +47,7 @@ HEADERS = {
 
 
 # =========================================================
-# CACHES
+# CACHE
 # =========================================================
 
 EPISODES_CACHE = None
@@ -61,25 +64,18 @@ CACHE_LOCK = threading.RLock()
 # THREAD POOLS
 # =========================================================
 
-# برای کارهای شبکه‌ای مثل Telegram و Supabase
 IO_POOL = ThreadPoolExecutor(max_workers=12)
-
-# برای پردازش updateهای تلگرام
 UPDATE_POOL = ThreadPoolExecutor(max_workers=8)
 
 
 # =========================================================
-# THREAD LOCAL REQUEST SESSION
+# REQUEST SESSION
 # =========================================================
 
 _thread_local = threading.local()
 
 
 def get_session():
-    """
-    برای هر thread یک requests.Session جدا نگه می‌دارد
-    تا connection ها دوباره استفاده شوند.
-    """
 
     session = getattr(
         _thread_local,
@@ -88,6 +84,7 @@ def get_session():
     )
 
     if session is None:
+
         session = requests.Session()
 
         adapter = requests.adapters.HTTPAdapter(
@@ -112,7 +109,7 @@ def get_session():
 
 
 # =========================================================
-# SMALL HELPERS
+# HELPERS
 # =========================================================
 
 def now_perf():
@@ -127,10 +124,63 @@ def elapsed(start):
 
 
 # =========================================================
-# TELEGRAM API
+# KEEP ALIVE
 # =========================================================
 
-def telegram(method, data=None):
+def keep_alive():
+
+    while True:
+
+        try:
+
+            time.sleep(
+                KEEP_ALIVE_INTERVAL
+            )
+
+            start = now_perf()
+
+            session = get_session()
+
+            r = session.get(
+                WEBHOOK_URL.replace(
+                    "/webhook",
+                    "/"
+                ),
+                timeout=(3, 8)
+            )
+
+            print(
+                f"[KEEP ALIVE] "
+                f"HTTP {r.status_code} | "
+                f"{elapsed(start)}s"
+            )
+
+        except Exception as e:
+
+            print(
+                "[KEEP ALIVE ERROR]",
+                e
+            )
+
+
+def start_keep_alive():
+
+    thread = threading.Thread(
+        target=keep_alive,
+        daemon=True
+    )
+
+    thread.start()
+
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+def telegram(
+    method,
+    data=None
+):
 
     start = now_perf()
 
@@ -152,11 +202,9 @@ def telegram(method, data=None):
                 "description": r.text
             }
 
-        duration = elapsed(start)
-
         print(
             f"[TG] {method} | "
-            f"{duration}s | "
+            f"{elapsed(start)}s | "
             f"HTTP {r.status_code}"
         )
 
@@ -166,13 +214,11 @@ def telegram(method, data=None):
 
         print(
             f"[TG ERROR] {method} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
+            f"{elapsed(start)}s | {e}"
         )
 
         return {
-            "ok": False,
-            "description": str(e)
+            "ok": False
         }
 
 
@@ -238,8 +284,7 @@ def db_get(
             print(
                 f"[DB GET] {table} | "
                 f"{elapsed(start)}s | "
-                f"HTTP {r.status_code} | "
-                f"{r.text}"
+                f"HTTP {r.status_code}"
             )
 
             return None
@@ -257,8 +302,7 @@ def db_get(
 
         print(
             f"[DB GET ERROR] {table} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
+            f"{elapsed(start)}s | {e}"
         )
 
         return None
@@ -279,7 +323,8 @@ def db_insert(
             f"{SUPABASE_URL}/rest/v1/{table}",
             headers={
                 **HEADERS,
-                "Prefer": "return=representation"
+                "Prefer":
+                    "return=representation"
             },
             json=data,
             timeout=(3, 8)
@@ -307,8 +352,7 @@ def db_insert(
 
         print(
             f"[DB INSERT ERROR] {table} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
+            f"{elapsed(start)}s | {e}"
         )
 
         return None
@@ -330,7 +374,8 @@ def db_patch(
             f"{SUPABASE_URL}/rest/v1/{table}",
             headers={
                 **HEADERS,
-                "Prefer": "return=representation"
+                "Prefer":
+                    "return=representation"
             },
             params=params,
             json=data,
@@ -342,8 +387,7 @@ def db_patch(
             print(
                 f"[DB PATCH] {table} | "
                 f"{elapsed(start)}s | "
-                f"HTTP {r.status_code} | "
-                f"{r.text}"
+                f"HTTP {r.status_code}"
             )
 
             return False
@@ -359,8 +403,7 @@ def db_patch(
 
         print(
             f"[DB PATCH ERROR] {table} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
+            f"{elapsed(start)}s | {e}"
         )
 
         return False
@@ -393,28 +436,20 @@ def db_delete(
 
             return True
 
-        print(
-            f"[DB DELETE] {table} | "
-            f"{elapsed(start)}s | "
-            f"HTTP {r.status_code} | "
-            f"{r.text}"
-        )
-
         return False
 
     except Exception as e:
 
         print(
             f"[DB DELETE ERROR] {table} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
+            f"{elapsed(start)}s | {e}"
         )
 
         return False
 
 
 # =========================================================
-# USER STATISTICS
+# USERS
 # =========================================================
 
 def track_user(
@@ -427,8 +462,6 @@ def track_user(
     if user_id == ADMIN_ID:
         return
 
-    start = now_perf()
-
     try:
 
         now = datetime.now(
@@ -438,8 +471,10 @@ def track_user(
         existing = db_get(
             "users",
             {
-                "user_id": f"eq.{user_id}",
-                "limit": "1"
+                "user_id":
+                    f"eq.{user_id}",
+                "limit":
+                    "1"
             }
         )
 
@@ -451,10 +486,12 @@ def track_user(
             db_patch(
                 "users",
                 {
-                    "user_id": f"eq.{user_id}"
+                    "user_id":
+                        f"eq.{user_id}"
                 },
                 {
-                    "last_seen": now
+                    "last_seen":
+                        now
                 }
             )
 
@@ -463,25 +500,20 @@ def track_user(
             db_insert(
                 "users",
                 {
-                    "user_id": user_id,
-                    "first_seen": now,
-                    "last_seen": now
+                    "user_id":
+                        user_id,
+                    "first_seen":
+                        now,
+                    "last_seen":
+                        now
                 }
             )
-
-        print(
-            f"[TRACK USER] "
-            f"user={user_id} | "
-            f"{elapsed(start)}s"
-        )
 
     except Exception as e:
 
         print(
-            f"[TRACK USER ERROR] "
-            f"user={user_id} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
+            "[TRACK USER ERROR]",
+            e
         )
 
 
@@ -489,7 +521,6 @@ def queue_track_user(
     user_id
 ):
 
-    # این دیگر جلوی /start را نمی‌گیرد
     IO_POOL.submit(
         track_user,
         user_id
@@ -501,21 +532,22 @@ def db_count(
     params=None
 ):
 
-    start = now_perf()
-
     try:
 
         session = get_session()
 
         headers = {
             **HEADERS,
-            "Prefer": "count=exact",
-            "Range": "0-0"
+            "Prefer":
+                "count=exact",
+            "Range":
+                "0-0"
         }
 
         final_params = {
             **(params or {}),
-            "select": "user_id"
+            "select":
+                "user_id"
         }
 
         r = session.get(
@@ -526,14 +558,6 @@ def db_count(
         )
 
         if r.status_code not in [200, 206]:
-
-            print(
-                f"[DB COUNT] {table} | "
-                f"{elapsed(start)}s | "
-                f"HTTP {r.status_code} | "
-                f"{r.text}"
-            )
-
             return 0
 
         content_range = r.headers.get(
@@ -546,19 +570,11 @@ def db_count(
             total = content_range.split("/")[-1]
 
             if total != "*":
-
                 return int(total)
 
         return len(r.json())
 
-    except Exception as e:
-
-        print(
-            f"[DB COUNT ERROR] {table} | "
-            f"{elapsed(start)}s | "
-            f"{e}"
-        )
-
+    except Exception:
         return 0
 
 
@@ -583,47 +599,37 @@ def get_stats():
         microsecond=0
     )
 
-    total_users = db_count(
-        "users"
-    )
-
-    today_users = db_count(
-        "users",
-        {
-            "last_seen":
-                f"gte.{today_start.isoformat()}"
-        }
-    )
-
-    monthly_users = db_count(
-        "users",
-        {
-            "last_seen":
-                f"gte.{month_start.isoformat()}"
-        }
-    )
-
-    new_month_users = db_count(
-        "users",
-        {
-            "first_seen":
-                f"gte.{month_start.isoformat()}"
-        }
-    )
-
     return (
-        total_users,
-        today_users,
-        monthly_users,
-        new_month_users
+        db_count("users"),
+        db_count(
+            "users",
+            {
+                "last_seen":
+                    f"gte.{today_start.isoformat()}"
+            }
+        ),
+        db_count(
+            "users",
+            {
+                "last_seen":
+                    f"gte.{month_start.isoformat()}"
+            }
+        ),
+        db_count(
+            "users",
+            {
+                "first_seen":
+                    f"gte.{month_start.isoformat()}"
+            }
+        )
     )
 
 
 # =========================================================
-# CACHE INDEX
+# CACHE
 # =========================================================
 
-def rebuild_episode_indexes(
+def rebuild_indexes(
     rows
 ):
 
@@ -654,7 +660,9 @@ def rebuild_episode_indexes(
                 start_code
             )
 
-            code_index[start_code] = (
+            code_index[
+                start_code
+            ] = (
                 episode,
                 None
             )
@@ -669,17 +677,19 @@ def rebuild_episode_indexes(
             ):
                 continue
 
-            type_code = item.get(
+            code = item.get(
                 "type_code"
             )
 
-            if type_code:
+            if code:
 
                 used_codes.add(
-                    type_code
+                    code
                 )
 
-                code_index[type_code] = (
+                code_index[
+                    code
+                ] = (
                     episode,
                     item.get(
                         "file_type",
@@ -698,36 +708,29 @@ def refresh_episodes_cache():
 
     global EPISODES_CACHE
 
-    start = now_perf()
-
     rows = db_get(
         "episodes",
         {
-            "select": "*",
-            "order": "id.asc"
+            "select":
+                "*",
+            "order":
+                "id.asc"
         }
     )
 
     if rows is None:
-
-        print(
-            "[CACHE] episodes refresh failed"
-        )
-
         return False
 
     with CACHE_LOCK:
 
         EPISODES_CACHE = rows
 
-    rebuild_episode_indexes(
+    rebuild_indexes(
         rows
     )
 
     print(
-        f"[CACHE] episodes loaded: "
-        f"{len(rows)} | "
-        f"{elapsed(start)}s"
+        f"[CACHE] episodes: {len(rows)}"
     )
 
     return True
@@ -740,7 +743,6 @@ def get_episodes():
     with CACHE_LOCK:
 
         if EPISODES_CACHE is not None:
-
             return EPISODES_CACHE
 
     refresh_episodes_cache()
@@ -754,22 +756,17 @@ def refresh_sponsors_cache():
 
     global SPONSORS_CACHE
 
-    start = now_perf()
-
     rows = db_get(
         "sponsors",
         {
-            "select": "*",
-            "order": "id.asc"
+            "select":
+                "*",
+            "order":
+                "id.asc"
         }
     )
 
     if rows is None:
-
-        print(
-            "[CACHE] sponsors refresh failed"
-        )
-
         return False
 
     with CACHE_LOCK:
@@ -777,9 +774,7 @@ def refresh_sponsors_cache():
         SPONSORS_CACHE = rows
 
     print(
-        f"[CACHE] sponsors loaded: "
-        f"{len(rows)} | "
-        f"{elapsed(start)}s"
+        f"[CACHE] sponsors: {len(rows)}"
     )
 
     return True
@@ -792,7 +787,6 @@ def get_sponsors():
     with CACHE_LOCK:
 
         if SPONSORS_CACHE is not None:
-
             return SPONSORS_CACHE
 
     refresh_sponsors_cache()
@@ -829,11 +823,8 @@ def unique_code():
 
         with CACHE_LOCK:
 
-            used = USED_CODES_CACHE
-
-        if code not in used:
-
-            return code
+            if code not in USED_CODES_CACHE:
+                return code
 
 
 # =========================================================
@@ -844,33 +835,17 @@ def get_episode_by_key(
     key
 ):
 
-    # سریع: بدون درخواست Supabase
     with CACHE_LOCK:
 
-        episode = EPISODE_INDEX.get(
+        return EPISODE_INDEX.get(
             key
         )
-
-    if episode:
-        return episode
-
-    # fallback اگر cache هنوز ساخته نشده
-    for episode in get_episodes():
-
-        if episode.get(
-            "episode_key"
-        ) == key:
-
-            return episode
-
-    return None
 
 
 def get_episode_by_type_code(
     code
 ):
 
-    # سریع‌ترین مسیر /start
     with CACHE_LOCK:
 
         result = CODE_INDEX.get(
@@ -878,39 +853,7 @@ def get_episode_by_type_code(
         )
 
     if result:
-
         return result
-
-    # fallback برای اطمینان
-    for episode in get_episodes():
-
-        if episode.get(
-            "start_code"
-        ) == code:
-
-            return episode, None
-
-        for item in episode.get(
-            "files"
-        ) or []:
-
-            if not isinstance(
-                item,
-                dict
-            ):
-                continue
-
-            if item.get(
-                "type_code"
-            ) == code:
-
-                return (
-                    episode,
-                    item.get(
-                        "file_type",
-                        "نامشخص"
-                    )
-                )
 
     return None, None
 
@@ -922,9 +865,6 @@ def ensure_type_codes(
     files = episode.get(
         "files"
     ) or []
-
-    if not files:
-        return episode
 
     groups = {}
 
@@ -950,59 +890,56 @@ def ensure_type_codes(
 
     for file_type, items in groups.items():
 
-        existing_code = None
+        code = None
 
         for item in items:
 
-            old_code = item.get(
+            if item.get(
                 "type_code"
-            )
+            ):
 
-            if old_code:
+                code = item[
+                    "type_code"
+                ]
 
-                existing_code = old_code
                 break
 
-        if not existing_code:
+        if not code:
 
-            existing_code = unique_code()
+            code = unique_code()
 
             with CACHE_LOCK:
-
                 USED_CODES_CACHE.add(
-                    existing_code
+                    code
                 )
 
         for item in items:
 
             if item.get(
                 "type_code"
-            ) != existing_code:
+            ) != code:
 
-                item["type_code"] = (
-                    existing_code
-                )
+                item[
+                    "type_code"
+                ] = code
 
                 changed = True
 
     if changed:
 
-        ok = db_patch(
+        db_patch(
             "episodes",
             {
                 "id":
                     f"eq.{episode['id']}"
             },
             {
-                "files": files
+                "files":
+                    files
             }
         )
 
-        if ok:
-
-            episode["files"] = files
-
-            refresh_episodes_cache()
+        refresh_episodes_cache()
 
     return episode
 
@@ -1053,8 +990,6 @@ def set_pending(
     file_type
 ):
 
-    start = now_perf()
-
     value = (
         f"{episode_key}|||"
         f"{file_type}"
@@ -1075,7 +1010,7 @@ def set_pending(
 
     if old:
 
-        ok = db_patch(
+        return db_patch(
             "pending",
             {
                 "user_id":
@@ -1087,27 +1022,17 @@ def set_pending(
             }
         )
 
-    else:
-
-        result = db_insert(
-            "pending",
-            {
-                "user_id":
-                    user_id,
-                "episode_key":
-                    value
-            }
-        )
-
-        ok = bool(result)
-
-    print(
-        f"[PENDING] "
-        f"user={user_id} | "
-        f"{elapsed(start)}s"
+    result = db_insert(
+        "pending",
+        {
+            "user_id":
+                user_id,
+            "episode_key":
+                value
+        }
     )
 
-    return ok
+    return bool(result)
 
 
 def get_pending(
@@ -1124,17 +1049,14 @@ def get_pending(
         }
     )
 
-    if rows:
-        return rows[0]
-
-    return None
+    return rows[0] if rows else None
 
 
 def delete_pending(
     user_id
 ):
 
-    return db_delete(
+    db_delete(
         "pending",
         {
             "user_id":
@@ -1209,7 +1131,6 @@ def check_channel(
     if not result.get(
         "ok"
     ):
-
         return False
 
     status = result[
@@ -1229,8 +1150,6 @@ def all_channels_joined(
     user_id
 ):
 
-    start = now_perf()
-
     channels = [
         CHANNEL_ID
     ]
@@ -1240,10 +1159,6 @@ def all_channels_joined(
         channels.append(
             sponsor["chat_id"]
         )
-
-    if not channels:
-
-        return True
 
     results = list(
         IO_POOL.map(
@@ -1256,19 +1171,9 @@ def all_channels_joined(
         )
     )
 
-    result = all(
+    return all(
         results
     )
-
-    print(
-        f"[MEMBERSHIP] "
-        f"user={user_id} | "
-        f"channels={len(channels)} | "
-        f"result={result} | "
-        f"{elapsed(start)}s"
-    )
-
-    return result
 
 
 # =========================================================
@@ -1279,9 +1184,7 @@ def show_join_message(
     chat_id
 ):
 
-    buttons = []
-
-    buttons.append(
+    buttons = [
         [
             {
                 "text":
@@ -1290,7 +1193,7 @@ def show_join_message(
                     CHANNEL_URL
             }
         ]
-    )
+    ]
 
     for sponsor in get_sponsors():
 
@@ -1368,7 +1271,7 @@ def show_posts_message(
 
 
 # =========================================================
-# FILE SENDING
+# FILE DELETE
 # =========================================================
 
 def delete_later(
@@ -1385,6 +1288,10 @@ def delete_later(
         message_id
     )
 
+
+# =========================================================
+# SEND FILE
+# =========================================================
 
 def send_file(
     chat_id,
@@ -1444,9 +1351,7 @@ def send_file(
 
         message_id = result[
             "result"
-        ][
-            "message_id"
-        ]
+        ]["message_id"]
 
         threading.Thread(
             target=delete_later,
@@ -1459,6 +1364,10 @@ def send_file(
 
     return result
 
+
+# =========================================================
+# SEND SELECTED TYPE
+# =========================================================
 
 def send_selected_type(
     chat_id,
@@ -1496,16 +1405,55 @@ def send_selected_type(
 
         return
 
+    sent_count = 0
+
     for item in selected:
 
-        send_file(
+        result = send_file(
             chat_id,
             item
         )
 
+        if result and result.get(
+            "ok"
+        ):
+
+            sent_count += 1
+
+    # پیام راهنما برای ذخیره فایل
+    if sent_count:
+
+        warning = send_message(
+            chat_id,
+
+            "⚠️ این فایل تا ۳۰ ثانیه دیگه پاک میشه.\n\n"
+            "📥 اگه می‌خوای فایل رو نگه داری، "
+            "همین الان ذخیره‌ش کن یا به پیام‌های ذخیره‌شده بفرست."
+        )
+
+        # پیام راهنما هم بعد از 30 ثانیه حذف شود
+        if warning and warning.get(
+            "ok"
+        ):
+
+            warning_id = warning[
+                "result"
+            ][
+                "message_id"
+            ]
+
+            threading.Thread(
+                target=delete_later,
+                args=(
+                    chat_id,
+                    warning_id
+                ),
+                daemon=True
+            ).start()
+
 
 # =========================================================
-# SEND EPISODE LINKS
+# SEND LINKS
 # =========================================================
 
 def send_episode_links(
@@ -1594,7 +1542,7 @@ def save_episode(
     }
 
     # -----------------------------------------
-    # EXISTING EPISODE
+    # EXISTING
     # -----------------------------------------
 
     if episode:
@@ -1632,12 +1580,6 @@ def save_episode(
 
             existing_code = unique_code()
 
-            with CACHE_LOCK:
-
-                USED_CODES_CACHE.add(
-                    existing_code
-                )
-
         new_file[
             "type_code"
         ] = existing_code
@@ -1659,7 +1601,6 @@ def save_episode(
         )
 
         if not ok:
-
             return None
 
         refresh_episodes_cache()
@@ -1669,21 +1610,11 @@ def save_episode(
         )
 
     # -----------------------------------------
-    # NEW EPISODE
+    # NEW
     # -----------------------------------------
 
     start_code = unique_code()
     type_code = unique_code()
-
-    with CACHE_LOCK:
-
-        USED_CODES_CACHE.add(
-            start_code
-        )
-
-        USED_CODES_CACHE.add(
-            type_code
-        )
 
     new_file[
         "type_code"
@@ -1759,7 +1690,7 @@ def delete_all():
 
 
 # =========================================================
-# CAPTION PARSER
+# PARSER
 # =========================================================
 
 def parse_caption(
@@ -1836,18 +1767,11 @@ def process_start(
     total_start = now_perf()
 
     print(
-        "\n"
-        "==============================\n"
         f"[START_FLOW] BEGIN | "
-        f"user={user_id} | "
-        f"code={code}\n"
-        "=============================="
+        f"user={user_id} | code={code}"
     )
 
-    # -----------------------------------------------------
-    # EPISODE LOOKUP
-    # -----------------------------------------------------
-
+    # پیدا کردن فایل از کش
     stage = now_perf()
 
     episode, file_type = (
@@ -1864,12 +1788,6 @@ def process_start(
 
     if not episode:
 
-        print(
-            f"[START_FLOW] "
-            f"TOTAL={elapsed(total_start)}s | "
-            f"INVALID CODE"
-        )
-
         send_message(
             chat_id,
             "❌ لینک فایل معتبر نیست یا قسمت پیدا نشد."
@@ -1880,18 +1798,13 @@ def process_start(
     if not file_type:
         file_type = "همه"
 
-    # -----------------------------------------------------
-    # PENDING + MEMBERSHIP همزمان شروع می‌شوند
-    # -----------------------------------------------------
-
-    episode_key = episode[
-        "episode_key"
-    ]
-
+    # همزمان:
+    # pending
+    # membership
     pending_future = IO_POOL.submit(
         set_pending,
         user_id,
-        episode_key,
+        episode["episode_key"],
         file_type
     )
 
@@ -1900,78 +1813,30 @@ def process_start(
         user_id
     )
 
-    # -----------------------------------------------------
-    # MEMBERSHIP
-    # -----------------------------------------------------
-
-    stage = now_perf()
-
     joined = membership_future.result()
 
-    print(
-        f"[START_FLOW] "
-        f"membership_wait="
-        f"{elapsed(stage)}s | "
-        f"joined={joined}"
-    )
-
-    # -----------------------------------------------------
-    # PENDING RESULT
-    # -----------------------------------------------------
-
-    stage = now_perf()
-
-    pending_ok = pending_future.result()
+    pending_future.result()
 
     print(
         f"[START_FLOW] "
-        f"pending_wait="
-        f"{elapsed(stage)}s | "
-        f"ok={pending_ok}"
+        f"membership={joined}"
     )
-
-    # -----------------------------------------------------
-    # SEND MESSAGE
-    # -----------------------------------------------------
-
-    stage = now_perf()
 
     if joined:
 
-        result = show_posts_message(
+        show_posts_message(
             chat_id
         )
-
-        message_type = "posts"
 
     else:
 
-        result = show_join_message(
+        show_join_message(
             chat_id
         )
 
-        message_type = "join"
-
     print(
         f"[START_FLOW] "
-        f"send_{message_type}="
-        f"{elapsed(stage)}s | "
-        f"telegram_ok="
-        f"{result.get('ok') if result else False}"
-    )
-
-    # -----------------------------------------------------
-    # TOTAL
-    # -----------------------------------------------------
-
-    print(
-        f"[START_FLOW] "
-        f"TOTAL="
-        f"{elapsed(total_start)}s"
-    )
-
-    print(
-        "==============================\n"
+        f"TOTAL={elapsed(total_start)}s"
     )
 
 
@@ -2013,7 +1878,6 @@ def handle_message(
         "/start"
     ):
 
-        # آمار کاربر در پس‌زمینه
         queue_track_user(
             user_id
         )
@@ -2049,10 +1913,6 @@ def handle_message(
 
     if user_id == ADMIN_ID:
 
-        # -------------------------------------------------
-        # TEST DB
-        # -------------------------------------------------
-
         if text == "/testdb":
 
             result = db_get(
@@ -2074,10 +1934,6 @@ def handle_message(
 
             return
 
-        # -------------------------------------------------
-        # STATS
-        # -------------------------------------------------
-
         if text == "/stats":
 
             (
@@ -2096,34 +1952,22 @@ def handle_message(
                 f"{now.month:02d}"
             )
 
-            text_stats = (
+            send_message(
+                chat_id,
 
                 "📊 آمار ربات\n\n"
-
                 f"👥 کل کاربران: "
                 f"{total_users}\n\n"
-
                 f"☀️ کاربران فعال امروز: "
                 f"{today_users}\n\n"
-
                 f"📅 کاربران فعال این ماه "
                 f"({month_name}): "
                 f"{monthly_users}\n\n"
-
                 f"🆕 کاربران جدید این ماه: "
                 f"{new_month_users}"
             )
 
-            send_message(
-                chat_id,
-                text_stats
-            )
-
             return
-
-        # -------------------------------------------------
-        # SPONSORS
-        # -------------------------------------------------
 
         if text == "/sponsors":
 
@@ -2138,9 +1982,7 @@ def handle_message(
 
                 return
 
-            out = (
-                "📢 اسپانسرها:\n\n"
-            )
+            out = "📢 اسپانسرها:\n\n"
 
             for sponsor in sponsors:
 
@@ -2156,10 +1998,6 @@ def handle_message(
             )
 
             return
-
-        # -------------------------------------------------
-        # REMOVE SPONSOR
-        # -------------------------------------------------
 
         if text.startswith(
             "/remove_sponsor"
@@ -2209,10 +2047,6 @@ def handle_message(
 
             return
 
-        # -------------------------------------------------
-        # ADD SPONSOR
-        # -------------------------------------------------
-
         if text.startswith(
             "/add_sponsor"
         ):
@@ -2258,10 +2092,6 @@ def handle_message(
                 )
 
             return
-
-        # -------------------------------------------------
-        # DELETE EPISODE
-        # -------------------------------------------------
 
         if text.startswith(
             "/delete_episode"
@@ -2323,10 +2153,6 @@ def handle_message(
 
             return
 
-        # -------------------------------------------------
-        # DELETE ALL
-        # -------------------------------------------------
-
         if text == "/delete_all":
 
             delete_all()
@@ -2339,7 +2165,7 @@ def handle_message(
             return
 
     # =====================================================
-    # ADMIN FILE UPLOAD
+    # ADMIN UPLOAD
     # =====================================================
 
     if user_id == ADMIN_ID:
@@ -2369,9 +2195,7 @@ def handle_message(
                     chat_id,
 
                     "❌ کپشن قابل شناسایی نیست.\n\n"
-
                     "مثال:\n"
-
                     "🪴 سریال «بالا پایین استانبول»\n"
                     "🪷 قسمت : 14\n"
                     "⚡ زیرنویس فوری\n"
@@ -2434,7 +2258,7 @@ def handle_message(
 
 
 # =========================================================
-# CALLBACK HANDLER
+# CALLBACK
 # =========================================================
 
 def handle_callback(
@@ -2450,7 +2274,6 @@ def handle_callback(
         "from"
     ]["id"]
 
-    # آمار در پس‌زمینه
     queue_track_user(
         user_id
     )
@@ -2481,36 +2304,22 @@ def handle_callback(
             {
                 "callback_query_id":
                     callback["id"],
-
                 "text":
                     "در حال بررسی عضویت..."
             }
         )
 
-        start = now_perf()
-
-        joined = all_channels_joined(
+        if not all_channels_joined(
             user_id
-        )
-
-        print(
-            f"[CALLBACK] "
-            f"check_join | "
-            f"user={user_id} | "
-            f"{elapsed(start)}s"
-        )
-
-        if not joined:
+        ):
 
             telegram(
                 "answerCallbackQuery",
                 {
                     "callback_query_id":
                         callback["id"],
-
                     "text":
                         "❌ هنوز عضویت کامل نیست.",
-
                     "show_alert":
                         True
                 }
@@ -2523,7 +2332,6 @@ def handle_callback(
             {
                 "callback_query_id":
                     callback["id"],
-
                 "text":
                     "✅ عضویت تأیید شد."
             }
@@ -2551,22 +2359,13 @@ def handle_callback(
             {
                 "callback_query_id":
                     callback["id"],
-
                 "text":
                     "در حال آماده‌سازی فایل..."
             }
         )
 
-        total_start = now_perf()
-
         pending = get_pending(
             user_id
-        )
-
-        print(
-            f"[CALLBACK] "
-            f"get_pending="
-            f"{elapsed(total_start)}s"
         )
 
         if not pending:
@@ -2576,18 +2375,14 @@ def handle_callback(
                 {
                     "callback_query_id":
                         callback["id"],
-
                     "text":
                         "❌ درخواست فعال پیدا نشد.",
-
                     "show_alert":
                         True
                 }
             )
 
             return
-
-        joined_start = now_perf()
 
         if not all_channels_joined(
             user_id
@@ -2598,22 +2393,14 @@ def handle_callback(
                 {
                     "callback_query_id":
                         callback["id"],
-
                     "text":
                         "❌ عضویت کانال‌ها کامل نیست.",
-
                     "show_alert":
                         True
                 }
             )
 
             return
-
-        print(
-            f"[CALLBACK] "
-            f"membership="
-            f"{elapsed(joined_start)}s"
-        )
 
         stored = pending.get(
             "episode_key",
@@ -2635,16 +2422,8 @@ def handle_callback(
             episode_key = stored
             file_type = "همه"
 
-        stage = now_perf()
-
         episode = get_episode_by_key(
             episode_key
-        )
-
-        print(
-            f"[CALLBACK] "
-            f"episode_lookup="
-            f"{elapsed(stage)}s"
         )
 
         if not episode:
@@ -2654,10 +2433,8 @@ def handle_callback(
                 {
                     "callback_query_id":
                         callback["id"],
-
                     "text":
                         "❌ قسمت پیدا نشد.",
-
                     "show_alert":
                         True
                 }
@@ -2694,10 +2471,7 @@ def handle_callback(
                 )
 
                 if ft not in types:
-
-                    types.append(
-                        ft
-                    )
+                    types.append(ft)
 
             for ft in types:
 
@@ -2714,13 +2488,6 @@ def handle_callback(
                 episode,
                 file_type
             )
-
-        print(
-            f"[CALLBACK] "
-            f"TOTAL="
-            f"{elapsed(total_start)}s | "
-            f"user={user_id}"
-        )
 
         return
 
@@ -2751,14 +2518,12 @@ def webhook():
         )
 
         if not update:
-
             return "OK"
 
-        # پردازش update را جدا می‌کنیم
-        # تا Flask سریع 200 بدهد.
         if (
             "message" in update
-            or "callback_query" in update
+            or
+            "callback_query" in update
         ):
 
             UPDATE_POOL.submit(
@@ -2797,18 +2562,16 @@ def process_update(
     except Exception as e:
 
         print(
-            "UPDATE PROCESS ERROR:",
+            "UPDATE ERROR:",
             e
         )
 
 
 # =========================================================
-# WEBHOOK SETUP
+# WEBHOOK
 # =========================================================
 
 def setup_webhook():
-
-    start = now_perf()
 
     result = telegram(
         "setWebhook",
@@ -2828,9 +2591,8 @@ def setup_webhook():
     )
 
     print(
-        f"WEBHOOK SETUP | "
-        f"{elapsed(start)}s | "
-        f"{result}"
+        "WEBHOOK:",
+        result
     )
 
 
@@ -2841,10 +2603,8 @@ def setup_webhook():
 def warm_caches():
 
     print(
-        "\n========== CACHE WARMUP =========="
+        "========== CACHE WARMUP =========="
     )
-
-    start = now_perf()
 
     episodes_future = IO_POOL.submit(
         refresh_episodes_cache
@@ -2854,18 +2614,11 @@ def warm_caches():
         refresh_sponsors_cache
     )
 
-    episodes_ok = episodes_future.result()
-    sponsors_ok = sponsors_future.result()
+    episodes_future.result()
+    sponsors_future.result()
 
     print(
-        f"[CACHE WARMUP] "
-        f"episodes={episodes_ok} | "
-        f"sponsors={sponsors_ok} | "
-        f"TOTAL={elapsed(start)}s"
-    )
-
-    print(
-        "==================================\n"
+        "========== CACHE READY =========="
     )
 
 
@@ -2879,26 +2632,12 @@ if __name__ == "__main__":
         "BOT STARTING..."
     )
 
-    if not BOT_TOKEN:
-        print(
-            "WARNING: BOT_TOKEN is missing"
-        )
-
-    if not SUPABASE_URL:
-        print(
-            "WARNING: SUPABASE_URL is missing"
-        )
-
-    if not SUPABASE_KEY:
-        print(
-            "WARNING: SUPABASE_KEY is missing"
-        )
-
-    # اول webhook
     setup_webhook()
 
-    # بعد cache ها را گرم می‌کنیم
     warm_caches()
+
+    # شروع Keep Alive
+    start_keep_alive()
 
     print(
         "BOT READY."
