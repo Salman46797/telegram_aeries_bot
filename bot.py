@@ -5,16 +5,16 @@ import string
 import threading
 import time
 import requests
-import hashlib
+
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask, request, jsonify
-from supabase import create_client
+from flask import Flask, request
 
+=========================================================
 
-# ============================================================
-# CONFIG
-# ============================================================
+SETTINGS
+
+=========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -29,2134 +29,2632 @@ WEBHOOK_URL = "https://telegram-aeries-bot.onrender.com/webhook"
 BOT_USERNAME = "Seryyaltorki_bot"
 
 DELETE_AFTER = 30
+
+هر چند دقیقه یک بار سرویس خودش را Ping می‌کند
+
 KEEP_ALIVE_INTERVAL = 5 * 60
 
+app = Flask(name)
 
-# ============================================================
-# APP
-# ============================================================
+=========================================================
 
-app = Flask(__name__)
+HEADERS
 
-supabase = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY
-)
+=========================================================
 
+HEADERS = {
+"apikey": SUPABASE_KEY,
+"Authorization": f"Bearer {SUPABASE_KEY}",
+"Content-Type": "application/json"
+}
 
-# ============================================================
-# THREAD LOCAL SESSION
-# ============================================================
+=========================================================
+
+CACHE
+
+=========================================================
+
+EPISODES_CACHE = None
+SPONSORS_CACHE = None
+
+EPISODE_INDEX = {}
+CODE_INDEX = {}
+USED_CODES_CACHE = set()
+
+CACHE_LOCK = threading.RLock()
+
+=========================================================
+
+THREAD POOLS
+
+=========================================================
+
+IO_POOL = ThreadPoolExecutor(max_workers=12)
+UPDATE_POOL = ThreadPoolExecutor(max_workers=8)
+
+=========================================================
+
+REQUEST SESSION
+
+=========================================================
 
 _thread_local = threading.local()
 
-
 def get_session():
-    if not hasattr(_thread_local, "session"):
-        session = requests.Session()
 
-        session.headers.update({
-            "Content-Type": "application/json"
-        })
+session = getattr(  
+    _thread_local,  
+    "session",  
+    None  
+)  
 
-        _thread_local.session = session
+if session is None:  
 
-    return _thread_local.session
+    session = requests.Session()  
 
+    adapter = requests.adapters.HTTPAdapter(  
+        pool_connections=20,  
+        pool_maxsize=20,  
+        max_retries=0  
+    )  
 
-# ============================================================
-# TELEGRAM API
-# ============================================================
+    session.mount(  
+        "https://",  
+        adapter  
+    )  
 
-def telegram_api(method, payload=None):
+    session.mount(  
+        "http://",  
+        adapter  
+    )  
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/{method}"
-    )
+    _thread_local.session = session  
 
-    try:
-        session = get_session()
+return session
 
-        response = session.post(
-            url,
-            json=payload or {},
-            timeout=15
-        )
+=========================================================
 
-        return response.json()
+HELPERS
 
-    except Exception as e:
+=========================================================
 
-        print(
-            "telegram_api error:",
-            method,
-            e
-        )
+def now_perf():
+return time.perf_counter()
 
-        return {
-            "ok": False
-        }
-
-
-def send_message(
-    chat_id,
-    text,
-    reply_markup=None
-):
-
-    payload = {
-        "chat_id": chat_id,
-        "text": text
-    }
-
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-
-    return telegram_api(
-        "sendMessage",
-        payload
-    )
-
-
-def edit_message(
-    chat_id,
-    message_id,
-    text,
-    reply_markup=None
-):
-
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text
-    }
-
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-
-    return telegram_api(
-        "editMessageText",
-        payload
-    )
-
-
-def delete_message(
-    chat_id,
-    message_id
-):
-
-    return telegram_api(
-        "deleteMessage",
-        {
-            "chat_id": chat_id,
-            "message_id": message_id
-        }
-    )
-
-
-def answer_callback(
-    callback_id,
-    text=""
-):
-
-    return telegram_api(
-        "answerCallbackQuery",
-        {
-            "callback_query_id": callback_id,
-            "text": text
-        }
-    )
-
-
-def get_me():
-
-    return telegram_api(
-        "getMe"
-    )
-
-
-def send_video(
-    chat_id,
-    file_id,
-    caption=""
-):
-
-    return telegram_api(
-        "sendVideo",
-        {
-            "chat_id": chat_id,
-            "video": file_id,
-            "caption": caption
-        }
-    )
-
-
-def send_document(
-    chat_id,
-    file_id,
-    caption=""
-):
-
-    return telegram_api(
-        "sendDocument",
-        {
-            "chat_id": chat_id,
-            "document": file_id,
-            "caption": caption
-        }
-    )
-
-
-def send_media_file(
-    chat_id,
-    file_info
-):
-
-    file_type = file_info.get(
-        "type"
-    )
-
-    file_id = file_info.get(
-        "file_id"
-    )
-
-    caption = file_info.get(
-        "caption",
-        ""
-    )
-
-    if file_type == "document":
-        return send_document(
-            chat_id,
-            file_id,
-            caption
-        )
-
-    return send_video(
-        chat_id,
-        file_id,
-        caption
-    )
-
-
-# ============================================================
-# KEY / CAPTION HELPERS
-# ============================================================
-
-def make_series_key(series_name):
-
-    series_hash = hashlib.sha1(
-        series_name.strip().lower().encode("utf-8")
-    ).hexdigest()[:10]
-
-    return "s" + series_hash
-
-
-def make_episode_key(
-    series_name,
-    episode_number
-):
-
-    return (
-        "ep_"
-        + make_series_key(series_name)
-        + "_"
-        + str(episode_number)
-    )
-
-
-def parse_caption(caption):
-
-    if not caption:
-        return None
-
-    series_match = re.search(
-        r"سریال\s*[«\"]([^»\"]+)[»\"]",
-        caption,
-        re.IGNORECASE
-    )
-
-    if not series_match:
-
-        series_match = re.search(
-            r"سریال\s*[:：\-]?\s*(.+?)(?:\n|$)",
-            caption,
-            re.IGNORECASE
-        )
-
-    episode_match = re.search(
-        r"قسمت\s*[:：\-]?\s*(\d+)",
-        caption,
-        re.IGNORECASE
-    )
-
-    if not series_match or not episode_match:
-        return None
-
-    series_name = (
-        series_match
-        .group(1)
-        .strip()
-    )
-
-    episode_number = int(
-        episode_match.group(1)
-    )
-
-    return {
-        "series_name": series_name,
-        "episode_number": episode_number,
-        "episode_key": make_episode_key(
-            series_name,
-            episode_number
-        )
-    }
-
-
-# ============================================================
-# SUPABASE - EPISODES
-# ============================================================
-
-def get_episode(
-    episode_key
-):
-
-    try:
-
-        result = (
-            supabase
-            .table("episodes")
-            .select("*")
-            .eq(
-                "episode_key",
-                episode_key
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-            return result.data[0]
-
-    except Exception as e:
-
-        print(
-            "get_episode error:",
-            e
-        )
-
-    return None
-
-
-def save_episode(
-    episode_key,
-    series_name,
-    episode_number,
-    files,
-    is_preview=False
-):
-
-    payload = {
-        "episode_key": episode_key,
-        "series_name": series_name,
-        "episode_number": episode_number,
-        "files": files,
-        "is_preview": is_preview
-    }
-
-    try:
-
-        return (
-            supabase
-            .table("episodes")
-            .upsert(
-                payload,
-                on_conflict="episode_key"
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "save_episode error:",
-            e
-        )
-
-        return None
-
-
-def delete_episode_from_db(
-    episode_key
-):
-
-    try:
-
-        return (
-            supabase
-            .table("episodes")
-            .delete()
-            .eq(
-                "episode_key",
-                episode_key
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "delete_episode error:",
-            e
-        )
-
-        return None
-
-
-def delete_all_episodes():
-
-    try:
-
-        return (
-            supabase
-            .table("episodes")
-            .delete()
-            .neq(
-                "episode_key",
-                ""
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "delete_all_episodes error:",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# PENDING
-# ============================================================
-
-def set_pending(
-    user_id,
-    episode_key
-):
-
-    try:
-
-        return (
-            supabase
-            .table("pending")
-            .upsert(
-                {
-                    "user_id": user_id,
-                    "episode_key": episode_key
-                },
-                on_conflict="user_id"
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "set_pending error:",
-            e
-        )
-
-        return None
-
-
-def get_pending(
-    user_id
-):
-
-    try:
-
-        result = (
-            supabase
-            .table("pending")
-            .select("*")
-            .eq(
-                "user_id",
-                user_id
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-
-            return (
-                result.data[0]
-                .get("episode_key")
-            )
-
-    except Exception as e:
-
-        print(
-            "get_pending error:",
-            e
-        )
-
-    return None
-
-
-def clear_pending(
-    user_id
-):
-
-    try:
-
-        return (
-            supabase
-            .table("pending")
-            .delete()
-            .eq(
-                "user_id",
-                user_id
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "clear_pending error:",
-            e
-        )
-
-        return None
-
-
-def clear_all_pending():
-
-    try:
-
-        return (
-            supabase
-            .table("pending")
-            .delete()
-            .neq(
-                "user_id",
-                0
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "clear_all_pending error:",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# USERS
-# ============================================================
-
-def save_user(
-    user_id
-):
-
-    try:
-
-        supabase.table(
-            "users"
-        ).upsert(
-            {
-                "user_id": user_id,
-                "last_seen": datetime.now(
-                    timezone.utc
-                ).isoformat()
-            },
-            on_conflict="user_id"
-        ).execute()
-
-    except Exception as e:
-
-        print(
-            "save_user error:",
-            e
-        )
-
-
-# ============================================================
-# SPONSORS
-# ============================================================
-
-def get_sponsors():
-
-    try:
-
-        result = (
-            supabase
-            .table("sponsors")
-            .select("*")
-            .order(
-                "id"
-            )
-            .execute()
-        )
-
-        return result.data or []
-
-    except Exception as e:
-
-        print(
-            "get_sponsors error:",
-            e
-        )
-
-        return []
-
-
-def add_sponsor(
-    chat_id,
-    title,
-    url
-):
-
-    try:
-
-        return (
-            supabase
-            .table("sponsors")
-            .insert(
-                {
-                    "chat_id": chat_id,
-                    "title": title,
-                    "url": url
-                }
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "add_sponsor error:",
-            e
-        )
-
-        return None
-
-
-def remove_sponsor(
-    sponsor_id
-):
-
-    try:
-
-        return (
-            supabase
-            .table("sponsors")
-            .delete()
-            .eq(
-                "id",
-                sponsor_id
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "remove_sponsor error:",
-            e
-        )
-
-        return None
-
-
-# ============================================================
-# MEMBERSHIP
-# ============================================================
-
-def check_channel_member(
-    user_id,
-    chat_id
-):
-
-    try:
-
-        result = telegram_api(
-            "getChatMember",
-            {
-                "chat_id": chat_id,
-                "user_id": user_id
-            }
-        )
-
-        if not result.get("ok"):
-            return False
-
-        status = (
-            result
-            .get("result", {})
-            .get("status")
-        )
-
-        return status in (
-            "creator",
-            "administrator",
-            "member"
-        )
-
-    except Exception as e:
-
-        print(
-            "check_channel_member error:",
-            e
-        )
-
-        return False
-
-
-def is_main_channel_member(
-    user_id
-):
-
-    return check_channel_member(
-        user_id,
-        CHANNEL_ID
-    )
-
-
-def check_all_sponsors(
-    user_id
-):
-
-    sponsors = get_sponsors()
-
-    missing = []
-
-    for sponsor in sponsors:
-
-        chat_id = sponsor.get(
-            "chat_id"
-        )
-
-        if not check_channel_member(
-            user_id,
-            chat_id
-        ):
-
-            missing.append(
-                sponsor
-            )
-
-    return missing
-
-
-# ============================================================
-# KEYBOARDS
-# ============================================================
-
-def main_channel_keyboard():
-
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "📣 عضویت در کانال",
-                    "url": CHANNEL_URL
-                }
-            ]
-        ]
-    }
-
-
-def sponsor_keyboard(
-    sponsors
-):
-
-    rows = []
-
-    for sponsor in sponsors:
-
-        rows.append(
-            [
-                {
-                    "text": sponsor.get(
-                        "title",
-                        "کانال"
-                    ),
-                    "url": sponsor.get(
-                        "url"
-                    )
-                }
-            ]
-        )
-
-    return {
-        "inline_keyboard": rows
-    }
-
-
-def join_keyboard():
-
-    sponsors = get_sponsors()
-
-    rows = [
-        [
-            {
-                "text": "📣 کانال اصلی",
-                "url": CHANNEL_URL
-            }
-        ]
-    ]
-
-    for sponsor in sponsors:
-
-        rows.append(
-            [
-                {
-                    "text": sponsor.get(
-                        "title",
-                        "کانال"
-                    ),
-                    "url": sponsor.get(
-                        "url"
-                    )
-                }
-            ]
-        )
-
-    rows.append(
-        [
-            {
-                "text": "عضو شدم ✅",
-                "callback_data": "check_join"
-            }
-        ]
-    )
-
-    return {
-        "inline_keyboard": rows
-    }
-
-
-def reaction_keyboard():
-
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "انجام دادم ✅",
-                    "callback_data": "check_reactions"
-                }
-            ]
-        ]
-    }
-
-
-# ============================================================
-# CHANNEL POSTS
-# ============================================================
-
-def save_channel_post(
-    message_id
-):
-
-    try:
-
-        return (
-            supabase
-            .table("channel_posts")
-            .upsert(
-                {
-                    "message_id": message_id
-                },
-                on_conflict="message_id"
-            )
-            .execute()
-        )
-
-    except Exception as e:
-
-        print(
-            "save_channel_post error:",
-            e
-        )
-
-        return None
-
-
-def get_last_posts(
-    count=5
-):
-
-    try:
-
-        result = (
-            supabase
-            .table("channel_posts")
-            .select("*")
-            .order(
-                "created_at",
-                desc=True
-            )
-            .limit(count)
-            .execute()
-        )
-
-        return result.data or []
-
-    except Exception as e:
-
-        print(
-            "get_last_posts error:",
-            e
-        )
-
-        return []
-
-
-# ============================================================
-# REACTIONS
-# ============================================================
-
-def user_reacted_to_last_posts(
-    user_id,
-    count=5
-):
-
-    posts = get_last_posts(
-        count
-    )
-
-    if len(posts) < count:
-        return False, len(posts)
-
-    for post in posts:
-
-        try:
-
-            result = (
-                supabase
-                .table("reactions")
-                .select("*")
-                .eq(
-                    "user_id",
-                    user_id
-                )
-                .eq(
-                    "message_id",
-                    post.get(
-                        "message_id"
-                    )
-                )
-                .eq(
-                    "reacted",
-                    True
-                )
-                .limit(1)
-                .execute()
-            )
-
-            if not result.data:
-                return False, len(posts)
-
-        except Exception as e:
-
-            print(
-                "reaction check error:",
-                e
-            )
-
-            return False, len(posts)
-
-    return True, len(posts)
-
-
-# ============================================================
-# PAGES
-# ============================================================
-
-def show_join_page(
-    chat_id,
-    user_id
-):
-
-    send_message(
-        chat_id,
-        "📣برای استفاده از ربات و دریافت فایل :\n\n"
-        "1️⃣ابتدا عضو کانال های زیر بشید\n"
-        "2️⃣سپس رو دکمه عضو شدم کلیک کنید",
-        join_keyboard()
-    )
-
-
-def show_reaction_page(
-    chat_id,
-    user_id
-):
-
-    ok, count = user_reacted_to_last_posts(
-        user_id,
-        5
-    )
-
-    if ok:
-
-        send_episode_to_user(
-            chat_id,
-            user_id
-        )
-
-        return
-
-    send_message(
-        chat_id,
-        "لطفا جهت دریافت فایل ابتدا 5 پست اخیر کانال "
-        "@altiustuistsnbol را ری اکت بزنید و سپس برگردید "
-        "و دکمه انجام دادم را کلیک کنید ♥️",
-        reaction_keyboard()
-    )
-
-
-# ============================================================
-# SEND EPISODE
-# ============================================================
-
-def send_episode_to_user(
-    chat_id,
-    user_id
-):
-
-    episode_key = get_pending(
-        user_id
-    )
-
-    if not episode_key:
-
-        send_message(
-            chat_id,
-            "لینک قسمت پیدا نشد. دوباره لینک قسمت رو باز کن."
-        )
-
-        return
-
-    episode = get_episode(
-        episode_key
-    )
-
-    if not episode:
-
-        clear_pending(
-            user_id
-        )
-
-        send_message(
-            chat_id,
-            "این قسمت دیگه موجود نیست."
-        )
-
-        return
-
-    files = (
-        episode
-        .get("files")
-        or []
-    )
-
-    if not files:
-
-        send_message(
-            chat_id,
-            "فایل این قسمت پیدا نشد."
-        )
-
-        return
-
-    clear_pending(
-        user_id
-    )
-
-    sent_ids = []
-
-    for file_info in files:
-
-        result = send_media_file(
-            chat_id,
-            file_info
-        )
-
-        if result.get("ok"):
-
-            sent_message = (
-                result
-                .get("result", {})
-            )
-
-            message_id = (
-                sent_message
-                .get("message_id")
-            )
-
-            if message_id:
-                sent_ids.append(
-                    message_id
-                )
-
-    if not sent_ids:
-
-        send_message(
-            chat_id,
-            "ارسال فایل انجام نشد. چند لحظه بعد دوباره امتحان کن."
-        )
-
-        return
-
-    send_message(
-        chat_id,
-        f"فایل‌ها ارسال شد ✅\n"
-        f"تا {DELETE_AFTER} ثانیه فرصت داری ذخیره‌شون کنی."
-    )
-
-    threading.Thread(
-        target=delete_sent_messages_later,
-        args=(
-            chat_id,
-            sent_ids
-        ),
-        daemon=True
-    ).start()
-
-
-def delete_sent_messages_later(
-    chat_id,
-    message_ids
-):
-
-    time.sleep(
-        DELETE_AFTER
-    )
-
-    for message_id in message_ids:
-
-        delete_message(
-            chat_id,
-            message_id
-        )
-
-    send_message(
-        chat_id,
-        "فایل‌های ارسالی حذف شدند 🗑️\n"
-        "برای دریافت دوباره، لینک قسمت رو دوباره باز کن."
-    )
-
-
-# ============================================================
-# ADMIN FILE HANDLING
-# ============================================================
-
-def extract_file_from_message(
-    message
-):
-
-    if message.get("video"):
-
-        video = message["video"]
-
-        return {
-            "type": "video",
-            "file_id": video.get("file_id"),
-            "caption": message.get(
-                "caption",
-                ""
-            )
-        }
-
-    if message.get("document"):
-
-        document = message["document"]
-
-        return {
-            "type": "document",
-            "file_id": document.get("file_id"),
-            "caption": message.get(
-                "caption",
-                ""
-            )
-        }
-
-    return None
-
-
-def handle_admin_file(
-    message
-):
-
-    file_info = extract_file_from_message(
-        message
-    )
-
-    if not file_info:
-        return False
-
-    caption = file_info.get(
-        "caption",
-        ""
-    )
-
-    parsed = parse_caption(
-        caption
-    )
-
-    if not parsed:
-
-        send_message(
-            ADMIN_ID,
-            "❌ کپشن فایل قابل تشخیص نیست.\n\n"
-            "نمونه:\n"
-            "🪴 سریال «عشق و تخت»\n"
-            "🪷 قسمت : 2\n"
-            "🫧 زبان اصلی\n"
-            "🎍 کیفیت : 1080"
-        )
-
-        return True
-
-    # ========================================================
-    # PREVIEW
-    # ========================================================
-    # پیش‌نمایش کاملاً جدا از قسمت اصلی ذخیره می‌شود.
-    # مثلاً:
-    #
-    # قسمت اصلی:
-    # ep_sxxxxxxxxxx_16
-    #
-    # پیش‌نمایش:
-    # preview__ep_sxxxxxxxxxx_16
-    #
-    # بنابراین هیچ‌وقت با فایل‌های قسمت اصلی قاطی نمی‌شود.
-
-    is_preview = bool(
-        re.search(
-            r"پیش[\s‌-]*نمایش",
-            caption,
-            re.IGNORECASE
-        )
-    )
-
-    if is_preview:
-
-        episode_key = (
-            "preview__"
-            + parsed["episode_key"]
-        )
-
-    else:
-
-        episode_key = (
-            parsed["episode_key"]
-        )
-
-    episode = get_episode(
-        episode_key
-    )
-
-    if episode:
-
-        files = (
-            episode.get("files")
-            or []
-        )
-
-    else:
-
-        files = []
-
-    files.append(
-        file_info
-    )
-
-    saved = save_episode(
-        episode_key=episode_key,
-        series_name=parsed["series_name"],
-        episode_number=parsed["episode_number"],
-        files=files,
-        is_preview=is_preview
-    )
-
-    if saved is None:
-
-        send_message(
-            ADMIN_ID,
-            "❌ ذخیره در Supabase انجام نشد."
-        )
-
-        return True
-
-    bot_username_result = get_me()
-
-    bot_username = (
-        bot_username_result
-        .get("result", {})
-        .get("username", "")
-    )
-
-    if bot_username:
-
-        link = (
-            f"https://t.me/{bot_username}"
-            f"?start={episode_key}"
-        )
-
-    else:
-
-        link = (
-            f"/start {episode_key}"
-        )
-
-    if is_preview:
-
-        send_message(
-            ADMIN_ID,
-            "✅ پیش‌نمایش ذخیره شد.\n\n"
-            f"سریال: {parsed['series_name']}\n"
-            f"قسمت: {parsed['episode_number']}\n"
-            f"تعداد فایل‌های پیش‌نمایش: {len(files)}\n\n"
-            f"لینک پیش‌نمایش:\n{link}"
-        )
-
-    else:
-
-        send_message(
-            ADMIN_ID,
-            "✅ فایل ذخیره شد.\n\n"
-            f"سریال: {parsed['series_name']}\n"
-            f"قسمت: {parsed['episode_number']}\n"
-            f"تعداد فایل‌های این قسمت: {len(files)}\n\n"
-            f"لینک قسمت:\n{link}"
-        )
-
-    return True
-
-
-# ============================================================
-# ADMIN COMMANDS
-# ============================================================
-
-def handle_admin_command(
-    chat_id,
-    user_id,
-    text
-):
-
-    if user_id != ADMIN_ID:
-        return False
-
-    text = text.strip()
-
-    if text == "/start":
-
-        send_message(
-            chat_id,
-            "پنل مدیریت ربات فعال است ✅\n\n"
-            "/sponsors\n"
-            "/episodes\n"
-            "/delete_all\n"
-            "/delete_episode KEY\n"
-            "/add_sponsor @channel | نام کانال | https://t.me/channel\n"
-            "/remove_sponsor ID"
-        )
-
-        return True
-
-    if text == "/sponsors":
-
-        sponsors = get_sponsors()
-
-        if not sponsors:
-
-            send_message(
-                chat_id,
-                "هیچ اسپانسری ثبت نشده."
-            )
-
-            return True
-
-        lines = [
-            "📋 لیست اسپانسرها:\n"
-        ]
-
-        for sponsor in sponsors:
-
-            lines.append(
-                f"ID: {sponsor.get('id')}\n"
-                f"کانال: {sponsor.get('chat_id')}\n"
-                f"نام: {sponsor.get('title')}\n"
-                f"لینک: {sponsor.get('url')}\n"
-            )
-
-        send_message(
-            chat_id,
-            "\n".join(lines)
-        )
-
-        return True
-
-    if text.startswith(
-        "/add_sponsor"
-    ):
-
-        parts = text.split(
-            " ",
-            1
-        )
-
-        if len(parts) != 2:
-
-            send_message(
-                chat_id,
-                "فرمت درست:\n"
-                "/add_sponsor @channel | نام کانال | https://t.me/channel"
-            )
-
-            return True
-
-        values = [
-            x.strip()
-            for x in parts[1].split("|")
-        ]
-
-        if len(values) != 3:
-
-            send_message(
-                chat_id,
-                "فرمت درست:\n"
-                "/add_sponsor @channel | نام کانال | https://t.me/channel"
-            )
-
-            return True
-
-        sponsor_chat_id = values[0]
-        sponsor_title = values[1]
-        sponsor_url = values[2]
-
-        result = add_sponsor(
-            sponsor_chat_id,
-            sponsor_title,
-            sponsor_url
-        )
-
-        if result is None:
-
-            send_message(
-                chat_id,
-                "❌ ذخیره اسپانسر انجام نشد."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-                "✅ اسپانسر اضافه شد."
-            )
-
-        return True
-
-    if text.startswith(
-        "/remove_sponsor"
-    ):
-
-        parts = text.split(
-            maxsplit=1
-        )
-
-        if len(parts) != 2:
-
-            send_message(
-                chat_id,
-                "فرمت درست:\n"
-                "/remove_sponsor ID"
-            )
-
-            return True
-
-        try:
-
-            sponsor_id = int(
-                parts[1]
-            )
-
-        except:
-
-            send_message(
-                chat_id,
-                "❌ ID نامعتبر است."
-            )
-
-            return True
-
-        result = remove_sponsor(
-            sponsor_id
-        )
-
-        if result is None:
-
-            send_message(
-                chat_id,
-                "❌ حذف اسپانسر انجام نشد."
-            )
-
-        else:
-
-            send_message(
-                chat_id,
-                "✅ اسپانسر حذف شد."
-            )
-
-        return True
-
-    if text == "/episodes":
-
-        try:
-
-            result = (
-                supabase
-                .table("episodes")
-                .select(
-                    "episode_key,series_name,episode_number"
-                )
-                .order(
-                    "series_name"
-                )
-                .order(
-                    "episode_number"
-                )
-                .eq(
-                    "is_preview",
-                    False
-                )
-                .execute()
-            )
-
-            rows = result.data or []
-
-            if not rows:
-
-                send_message(
-                    chat_id,
-                    "هیچ قسمتی ذخیره نشده."
-                )
-
-                return True
-
-            lines = [
-                "📺 قسمت‌های ذخیره‌شده:\n"
-            ]
-
-            for row in rows:
-
-                lines.append(
-                    f"{row.get('series_name')} - "
-                    f"قسمت {row.get('episode_number')}\n"
-                    f"{row.get('episode_key')}\n"
-                )
-
-            send_message(
-                chat_id,
-                "\n".join(lines)
-            )
-
-        except Exception as e:
-
-            print(
-                "episodes command error:",
-                e
-            )
-
-            send_message(
-                chat_id,
-                "❌ دریافت لیست قسمت‌ها انجام نشد."
-            )
-
-        return True
-
-    if text == "/delete_all":
-
-        delete_all_episodes()
-
-        clear_all_pending()
-
-        send_message(
-            chat_id,
-            "✅ اطلاعات قسمت‌ها و لینک‌های ذخیره‌شده پاک شدند.\n\n"
-            "⚠️ فایل‌های اصلی که قبلاً در تلگرام آپلود شده‌اند حذف نمی‌شوند."
-        )
-
-        return True
-
-    if text.startswith(
-        "/delete_episode"
-    ):
-
-        parts = text.split(
-            maxsplit=1
-        )
-
-        if len(parts) != 2:
-
-            send_message(
-                chat_id,
-                "فرمت درست:\n/delete_episode EPISODE_KEY"
-            )
-
-            return True
-
-        episode_key = (
-            parts[1].strip()
-        )
-
-        delete_episode_from_db(
-            episode_key
-        )
-
-        send_message(
-            chat_id,
-            f"✅ اطلاعات {episode_key} حذف شد."
-        )
-
-        return True
-
-    return False
-
-
-# ============================================================
-# START PROCESS
-# ============================================================
-
-def process_start(
-    chat_id,
-    user_id,
-    code
-):
-
-    episode = get_episode(
-        code
-    )
-
-    if not episode:
-
-        send_message(
-            chat_id,
-            "❌ لینک قسمت پیدا نشد."
-        )
-
-        return
-
-    set_pending(
-        user_id,
-        code
-    )
-
-    if not is_main_channel_member(
-        user_id
-    ):
-
-        show_join_page(
-            chat_id,
-            user_id
-        )
-
-        return
-
-    missing = check_all_sponsors(
-        user_id
-    )
-
-    if missing:
-
-        send_message(
-            chat_id,
-            "هنوز عضویت بعضی کانال‌ها تأیید نشده 👇",
-            sponsor_keyboard(missing)
-        )
-
-        return
-
-    show_reaction_page(
-        chat_id,
-        user_id
-    )
-
-
-# ============================================================
-# MESSAGE HANDLER
-# ============================================================
-
-def handle_message(
-    message
-):
-
-    chat = message.get(
-        "chat",
-        {}
-    )
-
-    chat_id = chat.get(
-        "id"
-    )
-
-    from_user = message.get(
-        "from",
-        {}
-    )
-
-    user_id = from_user.get(
-        "id"
-    )
-
-    if user_id:
-        save_user(
-            user_id
-        )
-
-    text = message.get(
-        "text",
-        ""
-    )
-
-    if text.startswith(
-        "/start"
-    ):
-
-        parts = text.split(
-            maxsplit=1
-        )
-
-        if len(parts) == 1:
-
-            if user_id == ADMIN_ID:
-
-                handle_admin_command(
-                    chat_id,
-                    user_id,
-                    text
-                )
-
-            return
-
-        code = parts[1].strip()
-
-        process_start(
-            chat_id,
-            user_id,
-            code
-        )
-
-        return
-
-    if text:
-
-        if handle_admin_command(
-            chat_id,
-            user_id,
-            text
-        ):
-            return
-
-    if user_id == ADMIN_ID:
-
-        if handle_admin_file(
-            message
-        ):
-            return
-
-
-# ============================================================
-# CALLBACK HANDLER
-# ============================================================
-
-def handle_callback(
-    callback
-):
-
-    callback_id = callback.get(
-        "id"
-    )
-
-    data = callback.get(
-        "data",
-        ""
-    )
-
-    from_user = callback.get(
-        "from",
-        {}
-    )
-
-    user_id = from_user.get(
-        "id"
-    )
-
-    callback_message = (
-        callback.get("message")
-        or {}
-    )
-
-    chat = (
-        callback_message.get("chat")
-        or {}
-    )
-
-    chat_id = chat.get(
-        "id"
-    )
-
-    message_id = callback_message.get(
-        "message_id"
-    )
-
-    # ========================================================
-    # CHECK JOIN
-    # ========================================================
-
-    if data == "check_join":
-
-        answer_callback(
-            callback_id,
-            "در حال بررسی عضویت..."
-        )
-
-        episode_key = get_pending(
-            user_id
-        )
-
-        if not episode_key:
-
-            if message_id:
-
-                edit_message(
-                    chat_id,
-                    message_id,
-                    "❌ لینک قسمت پیدا نشد."
-                )
-
-            return
-
-        if not is_main_channel_member(
-            user_id
-        ):
-
-            send_message(
-                chat_id,
-                "هنوز عضو کانال اصلی نیستی 👇",
-                main_channel_keyboard()
-            )
-
-            return
-
-        missing = check_all_sponsors(
-            user_id
-        )
-
-        if missing:
-
-            send_message(
-                chat_id,
-                "هنوز عضویت بعضی کانال‌ها تأیید نشده 👇",
-                sponsor_keyboard(missing)
-            )
-
-            return
-
-        if message_id:
-
-            delete_message(
-                chat_id,
-                message_id
-            )
-
-        show_reaction_page(
-            chat_id,
-            user_id
-        )
-
-        return
-
-    # ========================================================
-    # CHECK REACTIONS
-    # ========================================================
-
-    if data == "check_reactions":
-
-        answer_callback(
-            callback_id,
-            "در حال بررسی ری‌اکشن‌ها..."
-        )
-
-        episode_key = get_pending(
-            user_id
-        )
-
-        if not episode_key:
-
-            send_message(
-                chat_id,
-                "❌ لینک قسمت پیدا نشد."
-            )
-
-            return
-
-        ok, count = user_reacted_to_last_posts(
-            user_id,
-            5
-        )
-
-        if not ok:
-
-            send_message(
-                chat_id,
-                "هنوز ری‌اکشن ۵ پست آخر کامل نشده ❤️\n"
-                f"تعداد پست‌هایی که ربات بررسی می‌کند: {count}"
-            )
-
-            return
-
-        if message_id:
-
-            delete_message(
-                chat_id,
-                message_id
-            )
-
-        send_episode_to_user(
-            chat_id,
-            user_id
-        )
-
-        return
-
-
-# ============================================================
-# WEBHOOK
-# ============================================================
-
-@app.route(
-    "/",
-    methods=["GET"]
+def elapsed(start):
+return round(
+time.perf_counter() - start,
+3
 )
-def home():
 
-    return "Bot is running."
+=========================================================
 
+KEEP ALIVE
 
-@app.route(
-    "/health",
-    methods=["GET"]
-)
-def health():
-
-    return jsonify({
-        "ok": True,
-        "bot": "telegram"
-    })
-
-
-@app.route(
-    "/webhook",
-    methods=["POST"]
-)
-def webhook():
-
-    update = (
-        request
-        .get_json(
-            silent=True
-        )
-        or {}
-    )
-
-    print(
-        "UPDATE:",
-        update
-    )
-
-    # ========================================================
-    # CHANNEL POST
-    # ========================================================
-
-    channel_post = update.get(
-        "channel_post"
-    )
-
-    if channel_post:
-
-        chat = channel_post.get(
-            "chat",
-            {}
-        )
-
-        chat_username = chat.get(
-            "username"
-        )
-
-        if (
-            chat_username
-            and chat_username.lower()
-            == CHANNEL_ID
-            .replace("@", "")
-            .lower()
-        ):
-
-            message_id = channel_post.get(
-                "message_id"
-            )
-
-            if message_id:
-
-                save_channel_post(
-                    message_id
-                )
-
-        return jsonify({
-            "ok": True
-        })
-
-    # ========================================================
-    # MESSAGE
-    # ========================================================
-
-    message = update.get(
-        "message"
-    )
-
-    if message:
-
-        threading.Thread(
-            target=handle_message,
-            args=(message,),
-            daemon=True
-        ).start()
-
-        return jsonify({
-            "ok": True
-        })
-
-    # ========================================================
-    # CALLBACK
-    # ========================================================
-
-    callback = update.get(
-        "callback_query"
-    )
-
-    if callback:
-
-        threading.Thread(
-            target=handle_callback,
-            args=(callback,),
-            daemon=True
-        ).start()
-
-        return jsonify({
-            "ok": True
-        })
-
-    return jsonify({
-        "ok": True
-    })
-
-
-# ============================================================
-# WEBHOOK SETUP
-# ============================================================
-
-def setup_webhook():
-
-    result = telegram_api(
-        "setWebhook",
-        {
-            "url": WEBHOOK_URL,
-            "allowed_updates": [
-                "message",
-                "channel_post",
-                "callback_query"
-            ]
-        }
-    )
-
-    print(
-        "WEBHOOK:",
-        result
-    )
-
-
-# ============================================================
-# KEEP ALIVE
-# ============================================================
+=========================================================
 
 def keep_alive():
 
-    while True:
+while True:  
 
-        try:
+    try:  
 
-            requests.get(
-                WEBHOOK_URL,
-                timeout=10
-            )
+        time.sleep(  
+            KEEP_ALIVE_INTERVAL  
+        )  
 
-        except Exception as e:
+        start = now_perf()  
 
-            print(
-                "keep alive error:",
-                e
-            )
+        session = get_session()  
 
-        time.sleep(
-            KEEP_ALIVE_INTERVAL
+        r = session.get(  
+            WEBHOOK_URL.replace(  
+                "/webhook",  
+                "/"  
+            ),  
+            timeout=(3, 8)  
+        )  
+
+        print(  
+            f"[KEEP ALIVE] "  
+            f"HTTP {r.status_code} | "  
+            f"{elapsed(start)}s"  
+        )  
+
+    except Exception as e:  
+
+        print(  
+            "[KEEP ALIVE ERROR]",  
+            e  
         )
 
+def start_keep_alive():
 
-# ============================================================
-# STARTUP
-# ============================================================
+thread = threading.Thread(  
+    target=keep_alive,  
+    daemon=True  
+)  
 
-if __name__ == "__main__":
+thread.start()
 
-    print(
-        "Starting bot..."
+=========================================================
+
+TELEGRAM
+
+=========================================================
+
+def telegram(
+method,
+data=None
+):
+
+start = now_perf()  
+
+try:  
+
+    session = get_session()  
+
+    r = session.post(  
+        f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",  
+        json=data or {},  
+        timeout=(3, 8)  
+    )  
+
+    try:  
+        result = r.json()  
+    except Exception:  
+        result = {  
+            "ok": False,  
+            "description": r.text  
+        }  
+
+    print(  
+        f"[TG] {method} | "  
+        f"{elapsed(start)}s | "  
+        f"HTTP {r.status_code}"  
+    )  
+
+    return result  
+
+except Exception as e:  
+
+    print(  
+        f"[TG ERROR] {method} | "  
+        f"{elapsed(start)}s | {e}"  
+    )  
+
+    return {  
+        "ok": False  
+    }
+
+def send_message(
+chat_id,
+text,
+keyboard=None
+):
+
+data = {  
+    "chat_id": chat_id,  
+    "text": text,  
+    "disable_web_page_preview": True  
+}  
+
+if keyboard:  
+    data["reply_markup"] = keyboard  
+
+return telegram(  
+    "sendMessage",  
+    data  
+)
+
+def delete_message(
+chat_id,
+message_id
+):
+
+return telegram(  
+    "deleteMessage",  
+    {  
+        "chat_id": chat_id,  
+        "message_id": message_id  
+    }  
+)
+
+=========================================================
+
+SUPABASE
+
+=========================================================
+
+def db_get(
+table,
+params=None
+):
+
+start = now_perf()  
+
+try:  
+
+    session = get_session()  
+
+    r = session.get(  
+        f"{SUPABASE_URL}/rest/v1/{table}",  
+        headers=HEADERS,  
+        params=params or {},  
+        timeout=(3, 8)  
+    )  
+
+    if r.status_code != 200:  
+
+        print(  
+            f"[DB GET] {table} | "  
+            f"{elapsed(start)}s | "  
+            f"HTTP {r.status_code}"  
+        )  
+
+        return None  
+
+    result = r.json()  
+
+    print(  
+        f"[DB GET] {table} | "  
+        f"{elapsed(start)}s"  
+    )  
+
+    return result  
+
+except Exception as e:  
+
+    print(  
+        f"[DB GET ERROR] {table} | "  
+        f"{elapsed(start)}s | {e}"  
+    )  
+
+    return None
+
+def db_insert(
+table,
+data
+):
+
+start = now_perf()  
+
+try:  
+
+    session = get_session()  
+
+    r = session.post(  
+        f"{SUPABASE_URL}/rest/v1/{table}",  
+        headers={  
+            **HEADERS,  
+            "Prefer":  
+                "return=representation"  
+        },  
+        json=data,  
+        timeout=(3, 8)  
+    )  
+
+    if r.status_code in [200, 201]:  
+
+        print(  
+            f"[DB INSERT] {table} | "  
+            f"{elapsed(start)}s"  
+        )  
+
+        return r.json()  
+
+    print(  
+        f"[DB INSERT] {table} | "  
+        f"{elapsed(start)}s | "  
+        f"HTTP {r.status_code} | "  
+        f"{r.text}"  
+    )  
+
+    return None  
+
+except Exception as e:  
+
+    print(  
+        f"[DB INSERT ERROR] {table} | "  
+        f"{elapsed(start)}s | {e}"  
+    )  
+
+    return None
+
+def db_patch(
+table,
+params,
+data
+):
+
+start = now_perf()  
+
+try:  
+
+    session = get_session()  
+
+    r = session.patch(  
+        f"{SUPABASE_URL}/rest/v1/{table}",  
+        headers={  
+            **HEADERS,  
+            "Prefer":  
+                "return=representation"  
+        },  
+        params=params,  
+        json=data,  
+        timeout=(3, 8)  
+    )  
+
+    if r.status_code not in [200, 204]:  
+
+        print(  
+            f"[DB PATCH] {table} | "  
+            f"{elapsed(start)}s | "  
+            f"HTTP {r.status_code}"  
+        )  
+
+        return False  
+
+    print(  
+        f"[DB PATCH] {table} | "  
+        f"{elapsed(start)}s"  
+    )  
+
+    return True  
+
+except Exception as e:  
+
+    print(  
+        f"[DB PATCH ERROR] {table} | "  
+        f"{elapsed(start)}s | {e}"  
+    )  
+
+    return False
+
+def db_delete(
+table,
+params
+):
+
+start = now_perf()  
+
+try:  
+
+    session = get_session()  
+
+    r = session.delete(  
+        f"{SUPABASE_URL}/rest/v1/{table}",  
+        headers=HEADERS,  
+        params=params,  
+        timeout=(3, 8)  
+    )  
+
+    if r.status_code in [200, 204]:  
+
+        print(  
+            f"[DB DELETE] {table} | "  
+            f"{elapsed(start)}s"  
+        )  
+
+        return True  
+
+    return False  
+
+except Exception as e:  
+
+    print(  
+        f"[DB DELETE ERROR] {table} | "  
+        f"{elapsed(start)}s | {e}"  
+    )  
+
+    return False
+
+=========================================================
+
+USERS
+
+=========================================================
+
+def track_user(
+user_id
+):
+
+if not user_id:  
+    return  
+
+if user_id == ADMIN_ID:  
+    return  
+
+try:  
+
+    now = datetime.now(  
+        timezone.utc  
+    ).isoformat()  
+
+    existing = db_get(  
+        "users",  
+        {  
+            "user_id":  
+                f"eq.{user_id}",  
+            "limit":  
+                "1"  
+        }  
+    )  
+
+    if existing is None:  
+        return  
+
+    if existing:  
+
+        db_patch(  
+            "users",  
+            {  
+                "user_id":  
+                    f"eq.{user_id}"  
+            },  
+            {  
+                "last_seen":  
+                    now  
+            }  
+        )  
+
+    else:  
+
+        db_insert(  
+            "users",  
+            {  
+                "user_id":  
+                    user_id,  
+                "first_seen":  
+                    now,  
+                "last_seen":  
+                    now  
+            }  
+        )  
+
+except Exception as e:  
+
+    print(  
+        "[TRACK USER ERROR]",  
+        e  
     )
 
-    try:
+def queue_track_user(
+user_id
+):
 
-        setup_webhook()
+IO_POOL.submit(  
+    track_user,  
+    user_id  
+)
 
-    except Exception as e:
+def db_count(
+table,
+params=None
+):
 
-        print(
-            "setup webhook error:",
-            e
-        )
+try:  
 
-    threading.Thread(
-        target=keep_alive,
-        daemon=True
-    ).start()
+    session = get_session()  
 
-    port = int(
-        os.getenv(
-            "PORT",
-            "10000"
-        )
+    headers = {  
+        **HEADERS,  
+        "Prefer":  
+            "count=exact",  
+        "Range":  
+            "0-0"  
+    }  
+
+    final_params = {  
+        **(params or {}),  
+        "select":  
+            "user_id"  
+    }  
+
+    r = session.get(  
+        f"{SUPABASE_URL}/rest/v1/{table}",  
+        headers=headers,  
+        params=final_params,  
+        timeout=(3, 8)  
+    )  
+
+    if r.status_code not in [200, 206]:  
+        return 0  
+
+    content_range = r.headers.get(  
+        "Content-Range",  
+        ""  
+    )  
+
+    if "/" in content_range:  
+
+        total = content_range.split("/")[-1]  
+
+        if total != "*":  
+            return int(total)  
+
+    return len(r.json())  
+
+except Exception:  
+    return 0
+
+def get_stats():
+
+now = datetime.now(  
+    timezone.utc  
+)  
+
+today_start = now.replace(  
+    hour=0,  
+    minute=0,  
+    second=0,  
+    microsecond=0  
+)  
+
+month_start = now.replace(  
+    day=1,  
+    hour=0,  
+    minute=0,  
+    second=0,  
+    microsecond=0  
+)  
+
+return (  
+    db_count("users"),  
+    db_count(  
+        "users",  
+        {  
+            "last_seen":  
+                f"gte.{today_start.isoformat()}"  
+        }  
+    ),  
+    db_count(  
+        "users",  
+        {  
+            "last_seen":  
+                f"gte.{month_start.isoformat()}"  
+        }  
+    ),  
+    db_count(  
+        "users",  
+        {  
+            "first_seen":  
+                f"gte.{month_start.isoformat()}"  
+        }  
+    )  
+)
+
+=========================================================
+
+CACHE
+
+=========================================================
+
+def rebuild_indexes(
+rows
+):
+
+global EPISODE_INDEX  
+global CODE_INDEX  
+global USED_CODES_CACHE  
+
+episode_index = {}  
+code_index = {}  
+used_codes = set()  
+
+for episode in rows:  
+
+    key = episode.get(  
+        "episode_key"  
+    )  
+
+    if key:  
+        episode_index[key] = episode  
+
+    start_code = episode.get(  
+        "start_code"  
+    )  
+
+    if start_code:  
+
+        used_codes.add(  
+            start_code  
+        )  
+
+        code_index[  
+            start_code  
+        ] = (  
+            episode,  
+            None  
+        )  
+
+    for item in episode.get(  
+        "files"  
+    ) or []:  
+
+        if not isinstance(  
+            item,  
+            dict  
+        ):  
+            continue  
+
+        code = item.get(  
+            "type_code"  
+        )  
+
+        if code:  
+
+            used_codes.add(  
+                code  
+            )  
+
+            code_index[  
+                code  
+            ] = (  
+                episode,  
+                item.get(  
+                    "file_type",  
+                    "نامشخص"  
+                )  
+            )  
+
+with CACHE_LOCK:  
+
+    EPISODE_INDEX = episode_index  
+    CODE_INDEX = code_index  
+    USED_CODES_CACHE = used_codes
+
+def refresh_episodes_cache():
+
+global EPISODES_CACHE  
+
+rows = db_get(  
+    "episodes",  
+    {  
+        "select":  
+            "*",  
+        "order":  
+            "id.asc"  
+    }  
+)  
+
+if rows is None:  
+    return False  
+
+with CACHE_LOCK:  
+
+    EPISODES_CACHE = rows  
+
+rebuild_indexes(  
+    rows  
+)  
+
+print(  
+    f"[CACHE] episodes: {len(rows)}"  
+)  
+
+return True
+
+def get_episodes():
+
+global EPISODES_CACHE  
+
+with CACHE_LOCK:  
+
+    if EPISODES_CACHE is not None:  
+        return EPISODES_CACHE  
+
+refresh_episodes_cache()  
+
+with CACHE_LOCK:  
+
+    return EPISODES_CACHE or []
+
+def refresh_sponsors_cache():
+
+global SPONSORS_CACHE  
+
+rows = db_get(  
+    "sponsors",  
+    {  
+        "select":  
+            "*",  
+        "order":  
+            "id.asc"  
+    }  
+)  
+
+if rows is None:  
+    return False  
+
+with CACHE_LOCK:  
+
+    SPONSORS_CACHE = rows  
+
+print(  
+    f"[CACHE] sponsors: {len(rows)}"  
+)  
+
+return True
+
+def get_sponsors():
+
+global SPONSORS_CACHE  
+
+with CACHE_LOCK:  
+
+    if SPONSORS_CACHE is not None:  
+        return SPONSORS_CACHE  
+
+refresh_sponsors_cache()  
+
+with CACHE_LOCK:  
+
+    return SPONSORS_CACHE or []
+
+=========================================================
+
+CODES
+
+=========================================================
+
+def random_code(
+length=6
+):
+
+chars = (  
+    string.ascii_letters +  
+    string.digits  
+)  
+
+return "".join(  
+    random.choice(chars)  
+    for _ in range(length)  
+)
+
+def unique_code():
+
+while True:  
+
+    code = random_code()  
+
+    with CACHE_LOCK:  
+
+        if code not in USED_CODES_CACHE:  
+            return code
+
+=========================================================
+
+EPISODES
+
+=========================================================
+
+def get_episode_by_key(
+key
+):
+
+with CACHE_LOCK:  
+
+    return EPISODE_INDEX.get(  
+        key  
     )
 
-    app.run(
-        host="0.0.0.0",
-        port=port
+def get_episode_by_type_code(
+code
+):
+
+with CACHE_LOCK:  
+
+    result = CODE_INDEX.get(  
+        code  
+    )  
+
+if result:  
+    return result  
+
+return None, None
+
+def ensure_type_codes(
+episode
+):
+
+files = episode.get(  
+    "files"  
+) or []  
+
+groups = {}  
+
+for item in files:  
+
+    if not isinstance(  
+        item,  
+        dict  
+    ):  
+        continue  
+
+    file_type = item.get(  
+        "file_type",  
+        "نامشخص"  
+    )  
+
+    groups.setdefault(  
+        file_type,  
+        []  
+    ).append(item)  
+
+changed = False  
+
+for file_type, items in groups.items():  
+
+    code = None  
+
+    for item in items:  
+
+        if item.get(  
+            "type_code"  
+        ):  
+
+            code = item[  
+                "type_code"  
+            ]  
+
+            break  
+
+    if not code:  
+
+        code = unique_code()  
+
+        with CACHE_LOCK:  
+            USED_CODES_CACHE.add(  
+                code  
+            )  
+
+    for item in items:  
+
+        if item.get(  
+            "type_code"  
+        ) != code:  
+
+            item[  
+                "type_code"  
+            ] = code  
+
+            changed = True  
+
+if changed:  
+
+    db_patch(  
+        "episodes",  
+        {  
+            "id":  
+                f"eq.{episode['id']}"  
+        },  
+        {  
+            "files":  
+                files  
+        }  
+    )  
+
+    refresh_episodes_cache()  
+
+return episode
+
+def get_type_links(
+episode
+):
+
+episode = ensure_type_codes(  
+    episode  
+)  
+
+links = {}  
+
+for item in episode.get(  
+    "files"  
+) or []:  
+
+    if not isinstance(  
+        item,  
+        dict  
+    ):  
+        continue  
+
+    file_type = item.get(  
+        "file_type",  
+        "نامشخص"  
+    )  
+
+    code = item.get(  
+        "type_code"  
+    )  
+
+    if code and file_type not in links:  
+
+        links[file_type] = code  
+
+return links
+
+=========================================================
+
+PENDING
+
+=========================================================
+
+def set_pending(
+user_id,
+episode_key,
+file_type
+):
+
+value = (  
+    f"{episode_key}|||"  
+    f"{file_type}"  
+)  
+
+old = db_get(  
+    "pending",  
+    {  
+        "user_id":  
+            f"eq.{user_id}",  
+        "limit":  
+            "1"  
+    }  
+)  
+
+if old is None:  
+    return False  
+
+if old:  
+
+    return db_patch(  
+        "pending",  
+        {  
+            "user_id":  
+                f"eq.{user_id}"  
+        },  
+        {  
+            "episode_key":  
+                value  
+        }  
+    )  
+
+result = db_insert(  
+    "pending",  
+    {  
+        "user_id":  
+            user_id,  
+        "episode_key":  
+            value  
+    }  
+)  
+
+return bool(result)
+
+def get_pending(
+user_id
+):
+
+rows = db_get(  
+    "pending",  
+    {  
+        "user_id":  
+            f"eq.{user_id}",  
+        "limit":  
+            "1"  
+    }  
+)  
+
+return rows[0] if rows else None
+
+def delete_pending(
+user_id
+):
+
+db_delete(  
+    "pending",  
+    {  
+        "user_id":  
+            f"eq.{user_id}"  
+    }  
+)
+
+=========================================================
+
+SPONSORS
+
+=========================================================
+
+def add_sponsor(
+chat_id,
+title,
+url
+):
+
+result = db_insert(  
+    "sponsors",  
+    {  
+        "chat_id":  
+            chat_id,  
+        "title":  
+            title,  
+        "url":  
+            url  
+    }  
+)  
+
+refresh_sponsors_cache()  
+
+return result
+
+def remove_sponsor(
+sponsor_id
+):
+
+result = db_delete(  
+    "sponsors",  
+    {  
+        "id":  
+            f"eq.{sponsor_id}"  
+    }  
+)  
+
+refresh_sponsors_cache()  
+
+return result
+
+=========================================================
+
+MEMBERSHIP
+
+=========================================================
+
+def check_channel(
+channel,
+user_id
+):
+
+result = telegram(  
+    "getChatMember",  
+    {  
+        "chat_id":  
+            channel,  
+        "user_id":  
+            user_id  
+    }  
+)  
+
+if not result.get(  
+    "ok"  
+):  
+    return False  
+
+status = result[  
+    "result"  
+].get(  
+    "status"  
+)  
+
+return status in [  
+    "member",  
+    "administrator",  
+    "creator"  
+]
+
+def all_channels_joined(
+user_id
+):
+
+channels = [  
+    CHANNEL_ID  
+]  
+
+for sponsor in get_sponsors():  
+
+    channels.append(  
+        sponsor["chat_id"]  
+    )  
+
+results = list(  
+    IO_POOL.map(  
+        lambda ch:  
+            check_channel(  
+                ch,  
+                user_id  
+            ),  
+        channels  
+    )  
+)  
+
+return all(  
+    results  
+)
+
+=========================================================
+
+JOIN MESSAGE
+
+=========================================================
+
+def show_join_message(
+chat_id
+):
+
+buttons = [  
+    [  
+        {  
+            "text":  
+                "📢 کانال اصلی",  
+            "url":  
+                CHANNEL_URL  
+        }  
+    ]  
+]  
+
+for sponsor in get_sponsors():  
+
+    buttons.append(  
+        [  
+            {  
+                "text":  
+                    sponsor["title"],  
+                "url":  
+                    sponsor["url"]  
+            }  
+        ]  
+    )  
+
+buttons.append(  
+    [  
+        {  
+            "text":  
+                "عضو شدم ✅",  
+            "callback_data":  
+                "check_join"  
+        }  
+    ]  
+)  
+
+return send_message(  
+    chat_id,  
+
+    "📣برای استفاده از ربات و دریافت فایل :\n\n"  
+    "1️⃣ابتدا عضو کانال های زیر بشید\n"  
+    "2️⃣سپس رو دکمه عضو شدم کلیک کنید",  
+
+    {  
+        "inline_keyboard":  
+            buttons  
+    }  
+)
+
+def show_posts_message(
+chat_id
+):
+
+return send_message(  
+    chat_id,  
+
+    "لطفا جهت دریافت فایل ابتدا 5 پست اخیر "  
+    "کانال @altiustuistsnbol را ری اکت بزنید "  
+    "و سپس برگردید و دکمه انجام دادم را کلیک کنید ♥️",  
+
+    {  
+        "inline_keyboard": [  
+
+            [  
+                {  
+                    "text":  
+                        "📢 رفتن به کانال",  
+                    "url":  
+                        CHANNEL_URL  
+                }  
+            ],  
+
+            [  
+                {  
+                    "text":  
+                        "انجام دادم ✅",  
+                    "callback_data":  
+                        "done_posts"  
+                }  
+            ]  
+
+        ]  
+    }  
+)
+
+=========================================================
+
+FILE DELETE
+
+=========================================================
+
+def delete_later(
+chat_id,
+message_id
+):
+
+time.sleep(  
+    DELETE_AFTER  
+)  
+
+delete_message(  
+    chat_id,  
+    message_id  
+)
+
+=========================================================
+
+SEND FILE
+
+=========================================================
+
+def send_file(
+chat_id,
+item
+):
+
+file_id = item.get(  
+    "file_id"  
+)  
+
+if not file_id:  
+    return None  
+
+telegram_type = item.get(  
+    "type",  
+    "video"  
+)  
+
+caption = item.get(  
+    "caption",  
+    ""  
+)  
+
+if telegram_type == "document":  
+
+    result = telegram(  
+        "sendDocument",  
+        {  
+            "chat_id":  
+                chat_id,  
+            "document":  
+                file_id,  
+            "caption":  
+                caption  
+        }  
+    )  
+
+else:  
+
+    result = telegram(  
+        "sendVideo",  
+        {  
+            "chat_id":  
+                chat_id,  
+            "video":  
+                file_id,  
+            "caption":  
+                caption,  
+            "supports_streaming":  
+                True  
+        }  
+    )  
+
+if result.get(  
+    "ok"  
+):  
+
+    message_id = result[  
+        "result"  
+    ]["message_id"]  
+
+    threading.Thread(  
+        target=delete_later,  
+        args=(  
+            chat_id,  
+            message_id  
+        ),  
+        daemon=True  
+    ).start()  
+
+return result
+
+=========================================================
+
+SEND SELECTED TYPE
+
+=========================================================
+
+def send_selected_type(
+chat_id,
+episode,
+file_type
+):
+
+selected = []  
+
+for item in episode.get(  
+    "files"  
+) or []:  
+
+    if not isinstance(  
+        item,  
+        dict  
+    ):  
+        continue  
+
+    if item.get(  
+        "file_type",  
+        "نامشخص"  
+    ) == file_type:  
+
+        selected.append(  
+            item  
+        )  
+
+if not selected:  
+
+    send_message(  
+        chat_id,  
+        "❌ فایلی برای این نوع پیدا نشد."  
+    )  
+
+    return  
+
+sent_count = 0  
+
+for item in selected:  
+
+    result = send_file(  
+        chat_id,  
+        item  
+    )  
+
+    if result and result.get(  
+        "ok"  
+    ):  
+
+        sent_count += 1  
+
+# پیام راهنما برای ذخیره فایل  
+if sent_count:  
+
+    warning = send_message(  
+        chat_id,  
+
+        "⚠️ این فایل تا ۳۰ ثانیه دیگه پاک میشه.\n\n"  
+        "📥 اگه می‌خوای فایل رو نگه داری، "  
+        "همین الان ذخیره‌ش کن یا به پیام‌های ذخیره‌شده بفرست."  
+    )  
+
+    # پیام راهنما هم بعد از 30 ثانیه حذف شود  
+    if warning and warning.get(  
+        "ok"  
+    ):  
+
+        warning_id = warning[  
+            "result"  
+        ][  
+            "message_id"  
+        ]  
+
+        threading.Thread(  
+            target=delete_later,  
+            args=(  
+                chat_id,  
+                warning_id  
+            ),  
+            daemon=True  
+        ).start()
+
+=========================================================
+
+SEND LINKS
+
+=========================================================
+
+def send_episode_links(
+chat_id,
+episode
+):
+
+links = get_type_links(  
+    episode  
+)  
+
+if not links:  
+
+    send_message(  
+        chat_id,  
+        "❌ لینکی برای این قسمت ساخته نشد."  
+    )  
+
+    return  
+
+series = episode.get(  
+    "series_name",  
+    ""  
+)  
+
+number = episode.get(  
+    "episode_number",  
+    ""  
+)  
+
+text = (  
+    f"✅ قسمت {number} ذخیره شد.\n\n"  
+    f"🪴 سریال: {series}\n\n"  
+)  
+
+for file_type, code in links.items():  
+
+    link = (  
+        f"https://t.me/"  
+        f"{BOT_USERNAME}"  
+        f"?start={code}"  
+    )  
+
+    text += (  
+        f"🎬 {file_type}\n"  
+        f"{link}\n\n"  
+    )  
+
+send_message(  
+    chat_id,  
+    text  
+)
+
+=========================================================
+
+SAVE EPISODE
+
+=========================================================
+
+def save_episode(
+series,
+episode_number,
+file_id,
+file_type,
+telegram_type,
+caption
+):
+
+key = (  
+    f"{series}__"  
+    f"{episode_number}"  
+)  
+
+episode = get_episode_by_key(  
+    key  
+)  
+
+new_file = {  
+    "file_id":  
+        file_id,  
+    "type":  
+        telegram_type,  
+    "file_type":  
+        file_type,  
+    "caption":  
+        caption  
+}  
+
+# -----------------------------------------  
+# EXISTING  
+# -----------------------------------------  
+
+if episode:  
+
+    files = episode.get(  
+        "files"  
+    ) or []  
+
+    existing_code = None  
+
+    for item in files:  
+
+        if not isinstance(  
+            item,  
+            dict  
+        ):  
+            continue  
+
+        if item.get(  
+            "file_type",  
+            "نامشخص"  
+        ) == file_type:  
+
+            if item.get(  
+                "type_code"  
+            ):  
+
+                existing_code = item[  
+                    "type_code"  
+                ]  
+
+                break  
+
+    if not existing_code:  
+
+        existing_code = unique_code()  
+
+    new_file[  
+        "type_code"  
+    ] = existing_code  
+
+    files.append(  
+        new_file  
+    )  
+
+    ok = db_patch(  
+        "episodes",  
+        {  
+            "id":  
+                f"eq.{episode['id']}"  
+        },  
+        {  
+            "files":  
+                files  
+        }  
+    )  
+
+    if not ok:  
+        return None  
+
+    refresh_episodes_cache()  
+
+    return get_episode_by_key(  
+        key  
+    )  
+
+# -----------------------------------------  
+# NEW  
+# -----------------------------------------  
+
+start_code = unique_code()  
+type_code = unique_code()  
+
+new_file[  
+    "type_code"  
+] = type_code  
+
+data = {  
+    "episode_key":  
+        key,  
+    "series_name":  
+        series,  
+    "episode_number":  
+        episode_number,  
+    "files":  
+        [new_file],  
+    "start_code":  
+        start_code  
+}  
+
+result = db_insert(  
+    "episodes",  
+    data  
+)  
+
+if result:  
+
+    refresh_episodes_cache()  
+
+    return result[0]  
+
+return None
+
+=========================================================
+
+DELETE EPISODES
+
+=========================================================
+
+def delete_episode(
+series,
+number
+):
+
+key = (  
+    f"{series}__"  
+    f"{number}"  
+)  
+
+result = db_delete(  
+    "episodes",  
+    {  
+        "episode_key":  
+            f"eq.{key}"  
+    }  
+)  
+
+refresh_episodes_cache()  
+
+return result
+
+def delete_all():
+
+result = db_delete(  
+    "episodes",  
+    {  
+        "id":  
+            "gt.0"  
+    }  
+)  
+
+refresh_episodes_cache()  
+
+return result
+
+=========================================================
+
+PARSER
+
+=========================================================
+
+def parse_caption(
+caption
+):
+
+if not caption:  
+    return None  
+
+episode_match = re.search(  
+    r"قسمت\s*[:：]?\s*(\d+)",  
+    caption  
+)  
+
+if not episode_match:  
+    return None  
+
+episode_number = int(  
+    episode_match.group(1)  
+)  
+
+series = None  
+
+for line in caption.splitlines():  
+
+    if "سریال" in line:  
+
+        series = re.sub(  
+            r".*?سریال\s*",  
+            "",  
+            line  
+        ).strip(  
+            " «»\"'"  
+        )  
+
+        break  
+
+if not series:  
+    return None  
+
+if "زبان اصلی" in caption:  
+
+    file_type = "زبان اصلی"  
+
+elif "زیرنویس فوری" in caption:  
+
+    file_type = "زیرنویس فوری"  
+
+elif "زیرنویس مووی باز" in caption:  
+
+    file_type = "زیرنویس مووی باز"  
+
+else:  
+
+    file_type = "نامشخص"  
+
+return (  
+    series,  
+    episode_number,  
+    file_type  
+)
+
+=========================================================
+
+START FLOW
+
+=========================================================
+
+def process_start(
+chat_id,
+user_id,
+code
+):
+
+total_start = now_perf()  
+
+print(  
+    f"[START_FLOW] BEGIN | "  
+    f"user={user_id} | code={code}"  
+)  
+
+# پیدا کردن فایل از کش  
+stage = now_perf()  
+
+episode, file_type = (  
+    get_episode_by_type_code(  
+        code  
+    )  
+)  
+
+print(  
+    f"[START_FLOW] "  
+    f"episode_lookup="  
+    f"{elapsed(stage)}s"  
+)  
+
+if not episode:  
+
+    send_message(  
+        chat_id,  
+        "❌ لینک فایل معتبر نیست یا قسمت پیدا نشد."  
+    )  
+
+    return  
+
+if not file_type:  
+    file_type = "همه"  
+
+# همزمان:  
+# pending  
+# membership  
+pending_future = IO_POOL.submit(  
+    set_pending,  
+    user_id,  
+    episode["episode_key"],  
+    file_type  
+)  
+
+membership_future = IO_POOL.submit(  
+    all_channels_joined,  
+    user_id  
+)  
+
+joined = membership_future.result()  
+
+pending_future.result()  
+
+print(  
+    f"[START_FLOW] "  
+    f"membership={joined}"  
+)  
+
+if joined:  
+
+    show_posts_message(  
+        chat_id  
+    )  
+
+else:  
+
+    show_join_message(  
+        chat_id  
+    )  
+
+print(  
+    f"[START_FLOW] "  
+    f"TOTAL={elapsed(total_start)}s"  
+)
+
+=========================================================
+
+MESSAGE HANDLER
+
+=========================================================
+
+def handle_message(
+message
+):
+
+if not message:  
+    return  
+
+chat_id = message.get(  
+    "chat",  
+    {}  
+).get(  
+    "id"  
+)  
+
+user_id = message.get(  
+    "from",  
+    {}  
+).get(  
+    "id"  
+)  
+
+text = message.get(  
+    "text",  
+    ""  
+)  
+
+# =====================================================  
+# START  
+# =====================================================  
+
+if text.startswith(  
+    "/start"  
+):  
+
+    queue_track_user(  
+        user_id  
+    )  
+
+    parts = text.split(  
+        maxsplit=1  
+    )  
+
+    if len(parts) < 2:  
+
+        send_message(  
+            chat_id,  
+            "سلام 👋"  
+        )  
+
+        return  
+
+    code = parts[  
+        1  
+    ].strip()  
+
+    process_start(  
+        chat_id,  
+        user_id,  
+        code  
+    )  
+
+    return  
+
+# =====================================================  
+# ADMIN  
+# =====================================================  
+
+if user_id == ADMIN_ID:  
+
+    if text == "/testdb":  
+
+        result = db_get(  
+            "episodes",  
+            {  
+                "select":  
+                    "id",  
+                "limit":  
+                    "1"  
+            }  
+        )  
+
+        send_message(  
+            chat_id,  
+
+            "✅ اتصال ربات به Supabase برقرار است.\n\n"  
+            f"نتیجه: {result}"  
+        )  
+
+        return  
+
+    if text == "/stats":  
+
+        (  
+            total_users,  
+            today_users,  
+            monthly_users,  
+            new_month_users  
+        ) = get_stats()  
+
+        now = datetime.now(  
+            timezone.utc  
+        )  
+
+        month_name = (  
+            f"{now.year}/"  
+            f"{now.month:02d}"  
+        )  
+
+        send_message(  
+            chat_id,  
+
+            "📊 آمار ربات\n\n"  
+            f"👥 کل کاربران: "  
+            f"{total_users}\n\n"  
+            f"☀️ کاربران فعال امروز: "  
+            f"{today_users}\n\n"  
+            f"📅 کاربران فعال این ماه "  
+            f"({month_name}): "  
+            f"{monthly_users}\n\n"  
+            f"🆕 کاربران جدید این ماه: "  
+            f"{new_month_users}"  
+        )  
+
+        return  
+
+    if text == "/sponsors":  
+
+        sponsors = get_sponsors()  
+
+        if not sponsors:  
+
+            send_message(  
+                chat_id,  
+                "❌ هیچ اسپانسری ثبت نشده."  
+            )  
+
+            return  
+
+        out = "📢 اسپانسرها:\n\n"  
+
+        for sponsor in sponsors:  
+
+            out += (  
+                f"ID: {sponsor['id']}\n"  
+                f"{sponsor['title']}\n"  
+                f"{sponsor['url']}\n\n"  
+            )  
+
+        send_message(  
+            chat_id,  
+            out  
+        )  
+
+        return  
+
+    if text.startswith(  
+        "/remove_sponsor"  
+    ):  
+
+        parts = text.split()  
+
+        if len(parts) != 2:  
+
+            send_message(  
+                chat_id,  
+                "فرمت:\n/remove_sponsor ID"  
+            )  
+
+            return  
+
+        try:  
+
+            sponsor_id = int(  
+                parts[1]  
+            )  
+
+        except:  
+
+            send_message(  
+                chat_id,  
+                "❌ ID اشتباه است."  
+            )  
+
+            return  
+
+        if remove_sponsor(  
+            sponsor_id  
+        ):  
+
+            send_message(  
+                chat_id,  
+                "✅ اسپانسر حذف شد."  
+            )  
+
+        else:  
+
+            send_message(  
+                chat_id,  
+                "❌ حذف انجام نشد."  
+            )  
+
+        return  
+
+    if text.startswith(  
+        "/add_sponsor"  
+    ):  
+
+        raw = text.replace(  
+            "/add_sponsor",  
+            "",  
+            1  
+        ).strip()  
+
+        parts = [  
+            x.strip()  
+            for x in raw.split("|")  
+        ]  
+
+        if len(parts) != 3:  
+
+            send_message(  
+                chat_id,  
+
+                "فرمت درست:\n\n"  
+                "/add_sponsor @channel | نام کانال | https://t.me/channel"  
+            )  
+
+            return  
+
+        if add_sponsor(  
+            parts[0],  
+            parts[1],  
+            parts[2]  
+        ):  
+
+            send_message(  
+                chat_id,  
+                "✅ اسپانسر با موفقیت ذخیره شد."  
+            )  
+
+        else:  
+
+            send_message(  
+                chat_id,  
+                "❌ ذخیره اسپانسر انجام نشد."  
+            )  
+
+        return  
+
+    if text.startswith(  
+        "/delete_episode"  
+    ):  
+
+        raw = text.replace(  
+            "/delete_episode",  
+            "",  
+            1  
+        ).strip()  
+
+        parts = [  
+            x.strip()  
+            for x in raw.split("|")  
+        ]  
+
+        if len(parts) != 2:  
+
+            send_message(  
+                chat_id,  
+
+                "فرمت:\n"  
+                "/delete_episode اسم سریال | شماره قسمت"  
+            )  
+
+            return  
+
+        try:  
+
+            number = int(  
+                parts[1]  
+            )  
+
+        except:  
+
+            send_message(  
+                chat_id,  
+                "❌ شماره قسمت اشتباه است."  
+            )  
+
+            return  
+
+        if delete_episode(  
+            parts[0],  
+            number  
+        ):  
+
+            send_message(  
+                chat_id,  
+                "✅ قسمت حذف شد."  
+            )  
+
+        else:  
+
+            send_message(  
+                chat_id,  
+                "❌ حذف انجام نشد."  
+            )  
+
+        return  
+
+    if text == "/delete_all":  
+
+        delete_all()  
+
+        send_message(  
+            chat_id,  
+            "✅ همه قسمت‌ها حذف شدند."  
+        )  
+
+        return  
+
+# =====================================================  
+# ADMIN UPLOAD  
+# =====================================================  
+
+if user_id == ADMIN_ID:  
+
+    video = message.get(  
+        "video"  
+    )  
+
+    document = message.get(  
+        "document"  
+    )  
+
+    if video or document:  
+
+        caption = message.get(  
+            "caption",  
+            ""  
+        )  
+
+        parsed = parse_caption(  
+            caption  
+        )  
+
+        if not parsed:  
+
+            send_message(  
+                chat_id,  
+
+                "❌ کپشن قابل شناسایی نیست.\n\n"  
+                "مثال:\n"  
+                "🪴 سریال «بالا پایین استانبول»\n"  
+                "🪷 قسمت : 14\n"  
+                "⚡ زیرنویس فوری\n"  
+                "🎍 کیفیت : 1080"  
+            )  
+
+            return  
+
+        (  
+            series,  
+            episode_number,  
+            file_type  
+        ) = parsed  
+
+        if video:  
+
+            file_id = video[  
+                "file_id"  
+            ]  
+
+            telegram_type = "video"  
+
+        else:  
+
+            file_id = document[  
+                "file_id"  
+            ]  
+
+            telegram_type = "document"  
+
+        episode = save_episode(  
+            series,  
+            episode_number,  
+            file_id,  
+            file_type,  
+            telegram_type,  
+            caption  
+        )  
+
+        if episode:  
+
+            send_message(  
+                chat_id,  
+                "✅ فایل با موفقیت ذخیره شد."  
+            )  
+
+            send_episode_links(  
+                chat_id,  
+                episode  
+            )  
+
+        else:  
+
+            send_message(  
+                chat_id,  
+                "❌ ذخیره فایل انجام نشد."  
+            )  
+
+        return
+
+=========================================================
+
+CALLBACK
+
+=========================================================
+
+def handle_callback(
+callback
+):
+
+data = callback.get(  
+    "data",  
+    ""  
+)  
+
+user_id = callback[  
+    "from"  
+]["id"]  
+
+queue_track_user(  
+    user_id  
+)  
+
+message = callback.get(  
+    "message"  
+)  
+
+if not message:  
+    return  
+
+chat_id = message[  
+    "chat"  
+]["id"]  
+
+message_id = message[  
+    "message_id"  
+]  
+
+# =====================================================  
+# CHECK JOIN  
+# =====================================================  
+
+if data == "check_join":  
+
+    telegram(  
+        "answerCallbackQuery",  
+        {  
+            "callback_query_id":  
+                callback["id"],  
+            "text":  
+                "در حال بررسی عضویت..."  
+        }  
+    )  
+
+    if not all_channels_joined(  
+        user_id  
+    ):  
+
+        telegram(  
+            "answerCallbackQuery",  
+            {  
+                "callback_query_id":  
+                    callback["id"],  
+                "text":  
+                    "❌ هنوز عضویت کامل نیست.",  
+                "show_alert":  
+                    True  
+            }  
+        )  
+
+        return  
+
+    telegram(  
+        "answerCallbackQuery",  
+        {  
+            "callback_query_id":  
+                callback["id"],  
+            "text":  
+                "✅ عضویت تأیید شد."  
+        }  
+    )  
+
+    delete_message(  
+        chat_id,  
+        message_id  
+    )  
+
+    show_posts_message(  
+        chat_id  
+    )  
+
+    return  
+
+# =====================================================  
+# DONE POSTS  
+# =====================================================  
+
+if data == "done_posts":  
+
+    telegram(  
+        "answerCallbackQuery",  
+        {  
+            "callback_query_id":  
+                callback["id"],  
+            "text":  
+                "در حال آماده‌سازی فایل..."  
+        }  
+    )  
+
+    pending = get_pending(  
+        user_id  
+    )  
+
+    if not pending:  
+
+        telegram(  
+            "answerCallbackQuery",  
+            {  
+                "callback_query_id":  
+                    callback["id"],  
+                "text":  
+                    "❌ درخواست فعال پیدا نشد.",  
+                "show_alert":  
+                    True  
+            }  
+        )  
+
+        return  
+
+    if not all_channels_joined(  
+        user_id  
+    ):  
+
+        telegram(  
+            "answerCallbackQuery",  
+            {  
+                "callback_query_id":  
+                    callback["id"],  
+                "text":  
+                    "❌ عضویت کانال‌ها کامل نیست.",  
+                "show_alert":  
+                    True  
+            }  
+        )  
+
+        return  
+
+    stored = pending.get(  
+        "episode_key",  
+        ""  
+    )  
+
+    if "|||" in stored:  
+
+        (  
+            episode_key,  
+            file_type  
+        ) = stored.split(  
+            "|||",  
+            1  
+        )  
+
+    else:  
+
+        episode_key = stored  
+        file_type = "همه"  
+
+    episode = get_episode_by_key(  
+        episode_key  
+    )  
+
+    if not episode:  
+
+        telegram(  
+            "answerCallbackQuery",  
+            {  
+                "callback_query_id":  
+                    callback["id"],  
+                "text":  
+                    "❌ قسمت پیدا نشد.",  
+                "show_alert":  
+                    True  
+            }  
+        )  
+
+        return  
+
+    delete_message(  
+        chat_id,  
+        message_id  
+    )  
+
+    delete_pending(  
+        user_id  
+    )  
+
+    if file_type == "همه":  
+
+        types = []  
+
+        for item in episode.get(  
+            "files"  
+        ) or []:  
+
+            if not isinstance(  
+                item,  
+                dict  
+            ):  
+                continue  
+
+            ft = item.get(  
+                "file_type",  
+                "نامشخص"  
+            )  
+
+            if ft not in types:  
+                types.append(ft)  
+
+        for ft in types:  
+
+            send_selected_type(  
+                chat_id,  
+                episode,  
+                ft  
+            )  
+
+    else:  
+
+        send_selected_type(  
+            chat_id,  
+            episode,  
+            file_type  
+        )  
+
+    return
+
+=========================================================
+
+FLASK
+
+=========================================================
+
+@app.route(
+"/",
+methods=["GET"]
+)
+def home():
+
+return "Bot is running."
+
+@app.route(
+"/webhook",
+methods=["POST"]
+)
+def webhook():
+
+try:  
+
+    update = request.get_json(  
+        silent=True  
+    )  
+
+    if not update:  
+        return "OK"  
+
+    if (  
+        "message" in update  
+        or  
+        "callback_query" in update  
+    ):  
+
+        UPDATE_POOL.submit(  
+            process_update,  
+            update  
+        )  
+
+except Exception as e:  
+
+    print(  
+        "WEBHOOK ERROR:",  
+        e  
+    )  
+
+return "OK"
+
+def process_update(
+update
+):
+
+try:  
+
+    if "message" in update:  
+
+        handle_message(  
+            update["message"]  
+        )  
+
+    elif "callback_query" in update:  
+
+        handle_callback(  
+            update["callback_query"]  
+        )  
+
+except Exception as e:  
+
+    print(  
+        "UPDATE ERROR:",  
+        e  
     )
+
+=========================================================
+
+WEBHOOK
+
+=========================================================
+
+def setup_webhook():
+
+result = telegram(  
+    "setWebhook",  
+    {  
+        "url":  
+            WEBHOOK_URL,  
+
+        "allowed_updates": [  
+            "message",  
+            "channel_post",  
+            "callback_query"  
+        ],  
+
+        "max_connections":  
+            40  
+    }  
+)  
+
+print(  
+    "WEBHOOK:",  
+    result  
+)
+
+=========================================================
+
+CACHE WARMUP
+
+=========================================================
+
+def warm_caches():
+
+print(  
+    "========== CACHE WARMUP =========="  
+)  
+
+episodes_future = IO_POOL.submit(  
+    refresh_episodes_cache  
+)  
+
+sponsors_future = IO_POOL.submit(  
+    refresh_sponsors_cache  
+)  
+
+episodes_future.result()  
+sponsors_future.result()  
+
+print(  
+    "========== CACHE READY =========="  
+)
+
+=========================================================
+
+START
+
+=========================================================
+
+if name == "main":
+
+print(  
+    "BOT STARTING..."  
+)  
+
+setup_webhook()  
+
+warm_caches()  
+
+# شروع Keep Alive  
+start_keep_alive()  
+
+print(  
+    "BOT READY."  
+)  
+
+app.run(  
+    host="0.0.0.0",  
+    port=int(  
+        os.getenv(  
+            "PORT",  
+            10000  
+        )  
+    ),  
+    threaded=True  
+)
