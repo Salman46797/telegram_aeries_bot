@@ -21,10 +21,8 @@ DELETE_AFTER = 30
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing")
-
 if not SUPABASE_URL:
     raise RuntimeError("SUPABASE_URL is missing")
-
 if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_KEY is missing")
 
@@ -278,13 +276,11 @@ def get_episode(episode_key):
             .execute()
         )
 
-        if result.data:
-            return result.data[0]
+        return result.data[0] if result.data else None
 
     except Exception as e:
         print("get_episode error:", e)
-
-    return None
+        return None
 
 
 def save_episode(
@@ -380,15 +376,15 @@ def get_pending(user_id):
             .execute()
         )
 
-        if result.data:
-            return result.data[0].get(
-                "episode_key"
-            )
+        return (
+            result.data[0].get("episode_key")
+            if result.data
+            else None
+        )
 
     except Exception as e:
         print("get_pending error:", e)
-
-    return None
+        return None
 
 
 def clear_pending(user_id):
@@ -477,7 +473,7 @@ def remove_sponsor(sponsor_id):
 
 
 # ============================================================
-# SUPABASE - CHANNEL POSTS
+# CHANNEL POSTS
 # ============================================================
 def save_channel_post(message_id):
     try:
@@ -533,14 +529,19 @@ def check_all_sponsors(user_id):
     missing = []
 
     for sponsor in get_sponsors():
-        chat_id = sponsor.get("chat_id")
+
+        chat_id = sponsor.get(
+            "chat_id"
+        )
 
         if chat_id:
             if not member_status(
                 chat_id,
                 user_id
             ):
-                missing.append(sponsor)
+                missing.append(
+                    sponsor
+                )
 
     return missing
 
@@ -552,6 +553,7 @@ def sponsor_keyboard(sponsors):
     rows = []
 
     for sponsor in sponsors:
+
         title = (
             sponsor.get("title")
             or
@@ -618,6 +620,7 @@ def show_join_page(chat_id, user_id):
     if not is_main_channel_member(
         user_id
     ):
+
         send_message(
             chat_id,
             "📣برای استفاده از ربات و دریافت فایل :\n\n"
@@ -633,6 +636,7 @@ def show_join_page(chat_id, user_id):
     )
 
     if missing:
+
         send_message(
             chat_id,
             "📣برای استفاده از ربات و دریافت فایل :\n\n"
@@ -651,7 +655,10 @@ def show_join_page(chat_id, user_id):
     return True
 
 
-def show_reaction_page(chat_id, user_id):
+def show_reaction_page(
+    chat_id,
+    user_id
+):
 
     send_message(
         chat_id,
@@ -662,19 +669,45 @@ def show_reaction_page(chat_id, user_id):
     )
 
 
+def delete_sent_messages_later(
+    chat_id,
+    message_ids
+):
+
+    time.sleep(
+        DELETE_AFTER
+    )
+
+    for message_id in message_ids:
+
+        delete_message(
+            chat_id,
+            message_id
+        )
+
+    send_message(
+        chat_id,
+        "فایل‌های ارسالی حذف شدند 🗑️\n"
+        "برای دریافت دوباره، لینک قسمت رو دوباره باز کن."
+    )
+
+
 def send_episode_to_user(
     chat_id,
     user_id
 ):
+
     episode_key = get_pending(
         user_id
     )
 
     if not episode_key:
+
         send_message(
             chat_id,
-            "لینک قسمت پیدا نشد. دوباره لینک قسمت رو باز کن."
+            "❌ لینک قسمت پیدا نشد."
         )
+
         return
 
     episode = get_episode(
@@ -682,6 +715,7 @@ def send_episode_to_user(
     )
 
     if not episode:
+
         clear_pending(
             user_id
         )
@@ -699,6 +733,7 @@ def send_episode_to_user(
     )
 
     if not files:
+
         send_message(
             chat_id,
             "فایل این قسمت پیدا نشد."
@@ -733,6 +768,7 @@ def send_episode_to_user(
                 )
 
     if not sent_ids:
+
         send_message(
             chat_id,
             "ارسال فایل انجام نشد. چند لحظه بعد دوباره امتحان کن."
@@ -754,27 +790,6 @@ def send_episode_to_user(
         ),
         daemon=True
     ).start()
-
-
-def delete_sent_messages_later(
-    chat_id,
-    message_ids
-):
-    time.sleep(
-        DELETE_AFTER
-    )
-
-    for message_id in message_ids:
-        delete_message(
-            chat_id,
-            message_id
-        )
-
-    send_message(
-        chat_id,
-        "فایل‌های ارسالی حذف شدند 🗑️\n"
-        "برای دریافت دوباره، لینک قسمت رو دوباره باز کن."
-    )
 
 
 # ============================================================
@@ -834,14 +849,9 @@ def handle_admin_file(message):
         send_message(
             ADMIN_ID,
             "❌ کپشن فایل قابل تشخیص نیست.\n\n"
-            "فایل اصلی:\n"
-            "🪴 سریال «عشق و تخت»\n"
-            "🪷 قسمت : 2\n"
-            "🫧 زبان اصلی\n"
-            "🎍 کیفیت : 1080\n\n"
-            "پیش‌نمایش:\n"
-            "🪴 سریال «عشق و تخت»\n"
-            "🪷 قسمت : 2\n"
+            "فرمت مثال:\n"
+            "🪴 سریال «بالا پایین استانبول»\n"
+            "🪷 قسمت : 16\n"
             "🎬 پیش نمایش\n"
             "🫧 زبان اصلی"
         )
@@ -872,10 +882,12 @@ def handle_admin_file(message):
         )
 
         if preview_episode:
+
             preview_files = (
                 preview_episode.get("files")
                 or []
             )
+
         else:
             preview_files = []
 
@@ -916,6 +928,7 @@ def handle_admin_file(message):
             )
 
         else:
+
             link = (
                 f"/start {preview_key}"
             )
@@ -946,11 +959,14 @@ def handle_admin_file(message):
     )
 
     if episode:
+
         files = (
             episode.get("files")
             or []
         )
+
     else:
+
         files = []
 
     files.append(
@@ -990,6 +1006,7 @@ def handle_admin_file(message):
         )
 
     else:
+
         link = (
             f"/start {episode_key}"
         )
@@ -1021,9 +1038,9 @@ def handle_admin_command(
 
     text = text.strip()
 
-    # --------------------------------------------------------
+    # ========================================================
     # START
-    # --------------------------------------------------------
+    # ========================================================
     if text == "/start":
 
         send_message(
@@ -1033,20 +1050,22 @@ def handle_admin_command(
             "/episodes\n"
             "/delete_all\n"
             "/delete_episode EPISODE_KEY\n"
+            "/delete_preview اسم سریال | شماره قسمت\n"
             "/add_sponsor @channel | نام کانال | https://t.me/channel\n"
             "/remove_sponsor ID"
         )
 
         return True
 
-    # --------------------------------------------------------
+    # ========================================================
     # SPONSORS
-    # --------------------------------------------------------
+    # ========================================================
     if text == "/sponsors":
 
         sponsors = get_sponsors()
 
         if not sponsors:
+
             send_message(
                 chat_id,
                 "هیچ اسپانسری ثبت نشده."
@@ -1074,9 +1093,9 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
+    # ========================================================
     # ADD SPONSOR
-    # --------------------------------------------------------
+    # ========================================================
     if text.startswith(
         "/add_sponsor"
     ):
@@ -1122,9 +1141,9 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
+    # ========================================================
     # REMOVE SPONSOR
-    # --------------------------------------------------------
+    # ========================================================
     if text.startswith(
         "/remove_sponsor"
     ):
@@ -1165,9 +1184,9 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
+    # ========================================================
     # EPISODES
-    # --------------------------------------------------------
+    # ========================================================
     if text == "/episodes":
 
         try:
@@ -1185,14 +1204,14 @@ def handle_admin_command(
                 .execute()
             )
 
-            rows = result.data or []
-
-            # Preview ها در لیست قسمت‌های اصلی نشان داده نمی‌شوند.
             rows = [
-                row
-                for row in rows
+                x
+                for x in (
+                    result.data
+                    or []
+                )
                 if not str(
-                    row.get(
+                    x.get(
                         "episode_key",
                         ""
                     )
@@ -1242,9 +1261,85 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
+    # ========================================================
+    # DELETE PREVIEW
+    # ========================================================
+    if text.startswith(
+        "/delete_preview"
+    ):
+
+        raw = text[
+            len("/delete_preview"):
+        ].strip()
+
+        parts = [
+            x.strip()
+            for x in raw.split(
+                "|",
+                1
+            )
+        ]
+
+        if (
+            len(parts) != 2
+            or
+            not parts[0]
+            or
+            not parts[1].isdigit()
+        ):
+
+            send_message(
+                chat_id,
+                "فرمت درست:\n"
+                "/delete_preview اسم سریال | شماره قسمت"
+            )
+
+            return True
+
+        preview_key = make_preview_key(
+            parts[0],
+            int(parts[1])
+        )
+
+        preview = get_episode(
+            preview_key
+        )
+
+        if not preview:
+
+            send_message(
+                chat_id,
+                f"❌ پیش نمایش قسمت "
+                f"{parts[1]} برای این سریال پیدا نشد."
+            )
+
+            return True
+
+        result = delete_episode_from_db(
+            preview_key
+        )
+
+        if result is None:
+
+            send_message(
+                chat_id,
+                "❌ حذف پیش نمایش انجام نشد."
+            )
+
+        else:
+
+            send_message(
+                chat_id,
+                f"✅ پیش نمایش قسمت "
+                f"{parts[1]} از «{parts[0]}» حذف شد.\n\n"
+                "قسمت اصلی هیچ تغییری نکرد."
+            )
+
+        return True
+
+    # ========================================================
     # DELETE ALL
-    # --------------------------------------------------------
+    # ========================================================
     if text == "/delete_all":
 
         delete_all_episodes()
@@ -1252,19 +1347,17 @@ def handle_admin_command(
 
         send_message(
             chat_id,
-            "✅ اطلاعات قسمت‌ها، "
-            "پیش‌نمایش‌ها و لینک‌های "
+            "✅ اطلاعات قسمت‌ها، پیش‌نمایش‌ها و لینک‌های "
             "ذخیره‌شده پاک شدند.\n\n"
-            "⚠️ فایل‌های اصلی که قبلاً "
-            "در تلگرام آپلود شده‌اند "
-            "حذف نمی‌شوند."
+            "⚠️ فایل‌های اصلی که قبلاً در تلگرام "
+            "آپلود شده‌اند حذف نمی‌شوند."
         )
 
         return True
 
-    # --------------------------------------------------------
+    # ========================================================
     # DELETE EPISODE
-    # --------------------------------------------------------
+    # ========================================================
     if text.startswith(
         "/delete_episode"
     ):
@@ -1326,6 +1419,7 @@ def home():
     methods=["GET"]
 )
 def health():
+
     return jsonify(
         {
             "ok": True,
@@ -1353,9 +1447,9 @@ def webhook():
         update
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHANNEL POST
-    # --------------------------------------------------------
+    # ========================================================
     channel_post = update.get(
         "channel_post"
     )
@@ -1386,6 +1480,7 @@ def webhook():
             )
 
             if message_id:
+
                 save_channel_post(
                     message_id
                 )
@@ -1394,9 +1489,9 @@ def webhook():
             {"ok": True}
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # MESSAGE
-    # --------------------------------------------------------
+    # ========================================================
     message = update.get(
         "message"
     )
@@ -1421,7 +1516,7 @@ def webhook():
         )
 
         # ----------------------------------------------------
-        # ADMIN UPLOAD
+        # ADMIN
         # ----------------------------------------------------
         if user_id == ADMIN_ID:
 
@@ -1454,7 +1549,7 @@ def webhook():
                 )
 
         # ----------------------------------------------------
-        # START DEEP LINK
+        # START
         # ----------------------------------------------------
         if text.startswith(
             "/start"
@@ -1464,7 +1559,6 @@ def webhook():
                 maxsplit=1
             )
 
-            # /start معمولی
             if len(parts) == 1:
 
                 if user_id == ADMIN_ID:
@@ -1489,7 +1583,6 @@ def webhook():
                     {"ok": True}
                 )
 
-            # /start KEY
             episode_key = parts[1].strip()
 
             episode = get_episode(
@@ -1500,8 +1593,7 @@ def webhook():
 
                 send_message(
                     chat_id,
-                    "❌ این قسمت پیدا نشد "
-                    "یا حذف شده."
+                    "❌ این قسمت پیدا نشد یا حذف شده."
                 )
 
                 return jsonify(
@@ -1522,9 +1614,9 @@ def webhook():
                 {"ok": True}
             )
 
-    # --------------------------------------------------------
-    # CALLBACK QUERY
-    # --------------------------------------------------------
+    # ========================================================
+    # CALLBACK
+    # ========================================================
     callback = update.get(
         "callback_query"
     )
@@ -1686,10 +1778,9 @@ def webhook():
             {"ok": True}
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # MESSAGE REACTION
-    # --------------------------------------------------------
-    # ری‌اکشن‌ها دیگر ذخیره یا بررسی نمی‌شوند.
+    # ========================================================
     if update.get(
         "message_reaction"
     ):
