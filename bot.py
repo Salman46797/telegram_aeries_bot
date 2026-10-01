@@ -178,15 +178,9 @@ def make_preview_key(series_name, episode_number):
 
 
 def is_preview_caption(caption):
-    return bool(re.search(
-        r"پیش[\s‌-]*نمایش",
-        caption or "",
-        re.IGNORECASE
-    )) or bool(re.search(
-        r"\bpreview\b",
-        caption or "",
-        re.IGNORECASE
-    ))
+    return bool(re.search(r"پیش[\s‌-]*نمایش", caption or "", re.IGNORECASE)) or bool(
+        re.search(r"\bpreview\b", caption or "", re.IGNORECASE)
+    )
 
 
 def normalize_file_type(caption):
@@ -505,17 +499,17 @@ def remove_sponsor(sponsor_id):
 
 
 # ============================================================
-# SUPABASE - CHANNEL POSTS / REACTIONS
+# SUPABASE - CHANNEL POSTS
 # ============================================================
 
 def save_channel_post(message_id):
     try:
-        (
+        return (
             supabase
             .table("channel_posts")
             .upsert(
                 {
-                    "message_id": int(message_id)
+                    "message_id": message_id
                 },
                 on_conflict="message_id"
             )
@@ -524,6 +518,7 @@ def save_channel_post(message_id):
 
     except Exception as e:
         print("save_channel_post error:", e)
+        return None
 
 
 def get_last_posts(limit=5):
@@ -544,75 +539,8 @@ def get_last_posts(limit=5):
         return []
 
 
-def save_reaction(user_id, message_id, reacted=True):
-    try:
-        (
-            supabase
-            .table("reactions")
-            .delete()
-            .eq("user_id", int(user_id))
-            .eq("message_id", int(message_id))
-            .execute()
-        )
-
-        (
-            supabase
-            .table("reactions")
-            .insert(
-                {
-                    "user_id": int(user_id),
-                    "message_id": int(message_id),
-                    "reacted": bool(reacted)
-                }
-            )
-            .execute()
-        )
-
-    except Exception as e:
-        print("save_reaction error:", e)
-
-
-def has_reacted(user_id, message_id):
-    try:
-        result = (
-            supabase
-            .table("reactions")
-            .select("reacted")
-            .eq("user_id", int(user_id))
-            .eq("message_id", int(message_id))
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-            return bool(result.data[0].get("reacted"))
-
-    except Exception as e:
-        print("has_reacted error:", e)
-
-    return False
-
-
-def user_reacted_to_last_posts(user_id, limit=5):
-    posts = get_last_posts(limit)
-
-    if len(posts) < limit:
-        return False, len(posts)
-
-    for post in posts:
-        message_id = post.get("message_id")
-
-        if not message_id:
-            return False, len(posts)
-
-        if not has_reacted(user_id, message_id):
-            return False, len(posts)
-
-    return True, len(posts)
-
-
 # ============================================================
-# SUPABASE - STATS
+# STATS
 # ============================================================
 
 def record_stat(
@@ -628,11 +556,11 @@ def record_stat(
             .table("bot_stats")
             .insert(
                 {
-                    "user_id": int(user_id),
+                    "user_id": user_id,
                     "event_type": event_type,
                     "episode_key": episode_key,
                     "file_type": file_type,
-                    "file_count": int(file_count or 0)
+                    "file_count": file_count
                 }
             )
             .execute()
@@ -648,10 +576,7 @@ def get_stats():
         result = (
             supabase
             .table("bot_stats")
-            .select(
-                "user_id,event_type,episode_key,file_type,"
-                "file_count,created_at"
-            )
+            .select("*")
             .order("created_at", desc=True)
             .limit(10000)
             .execute()
@@ -659,64 +584,52 @@ def get_stats():
 
         rows = result.data or []
 
+        now = datetime.now(timezone.utc)
+
+        total_users = len(
+            set(
+                str(row.get("user_id"))
+                for row in rows
+                if row.get("user_id") is not None
+            )
+        )
+
+        month_users = len(
+            set(
+                str(row.get("user_id"))
+                for row in rows
+                if row.get("user_id") is not None
+                and row.get("created_at")
+                and (
+                    now
+                    - datetime.fromisoformat(
+                        row["created_at"].replace("Z", "+00:00")
+                    )
+                ).days < 30
+            )
+        )
+
+        total_files = sum(
+            int(row.get("file_count") or 0)
+            for row in rows
+        )
+
+        return {
+            "total_users": total_users,
+            "month_users": month_users,
+            "total_files": total_files,
+            "rows": rows
+        }
+
     except Exception as e:
         print("get_stats error:", e)
-        return None
 
-    now = datetime.now(timezone.utc)
-
-    month_prefix = (
-        f"{now.year:04d}-{now.month:02d}"
-    )
-
-    month = [
-        r for r in rows
-        if str(r.get("created_at", "")).startswith(month_prefix)
-    ]
-
-    downloads = [
-        r for r in month
-        if r.get("event_type") == "download"
-    ]
-
-    previews = [
-        r for r in month
-        if r.get("event_type") == "preview"
-    ]
-
-    users = {
-        int(r["user_id"])
-        for r in month
-        if r.get("event_type") == "download"
-        and r.get("user_id") is not None
-    }
-
-    all_downloads = [
-        r for r in rows
-        if r.get("event_type") == "download"
-    ]
-
-    all_users = {
-        int(r["user_id"])
-        for r in rows
-        if r.get("event_type") == "download"
-        and r.get("user_id") is not None
-    }
-
-    files = sum(
-        int(r.get("file_count") or 0)
-        for r in downloads
-    )
-
-    return {
-        "month": month_prefix,
-        "monthly_downloads": len(downloads),
-        "monthly_files": files,
-        "monthly_users": len(users),
-        "monthly_previews": len(previews),
-        "total_downloads": len(all_downloads),
-        "total_users": len(all_users)
-    }
+        return {
+            "total_users": 0,
+            "month_users": 0,
+            "total_files": 0,
+            "rows": []
+        }
 
 
 # ============================================================
@@ -739,21 +652,22 @@ def member_status(chat_id, user_id):
 
 
 def is_main_channel_member(user_id):
-    return member_status(CHANNEL_ID, user_id)
+    return member_status(
+        CHANNEL_ID,
+        user_id
+    )
 
 
 def check_all_sponsors(user_id):
-    sponsors = get_sponsors()
-
     missing = []
 
-    for sponsor in sponsors:
+    for sponsor in get_sponsors():
         chat_id = sponsor.get("chat_id")
 
-        if not chat_id:
-            continue
-
-        if not member_status(chat_id, user_id):
+        if chat_id and not member_status(
+            chat_id,
+            user_id
+        ):
             missing.append(sponsor)
 
     return missing
@@ -828,9 +742,12 @@ def show_join_page(chat_id, user_id):
     if not is_main_channel_member(user_id):
         send_message(
             chat_id,
-            "برای دریافت فایل اول باید عضو کانال اصلی بشی 👇",
+            "📣برای استفاده از ربات و دریافت فایل :\n\n"
+            "1️⃣ابتدا عضو کانال های زیر بشید\n"
+            "2️⃣سپس رو دکمه عضو شدم کلیک کنید",
             main_channel_keyboard()
         )
+
         return False
 
     missing = check_all_sponsors(user_id)
@@ -838,64 +755,91 @@ def show_join_page(chat_id, user_id):
     if missing:
         send_message(
             chat_id,
-            "برای دریافت فایل، اول عضو کانال‌های زیر شو 👇",
+            "📣برای استفاده از ربات و دریافت فایل :\n\n"
+            "1️⃣ابتدا عضو کانال های زیر بشید\n"
+            "2️⃣سپس رو دکمه عضو شدم کلیک کنید",
             sponsor_keyboard(missing)
         )
+
         return False
 
-    show_reaction_page(chat_id, user_id)
+    show_reaction_page(
+        chat_id,
+        user_id
+    )
+
     return True
 
 
 def show_reaction_page(chat_id, user_id):
-    ok, count = user_reacted_to_last_posts(user_id, 5)
-
-    if ok:
-        send_episode_to_user(chat_id, user_id)
-        return
-
     send_message(
         chat_id,
-        "برای دریافت فایل موردنظرت، ۵ پست آخر این کانال رو ری‌اکشن (❤️) بزن 👇\n\n"
-        + CHANNEL_URL,
+        "لطفا جهت دریافت فایل ابتدا 5 پست اخیر کانال @altiustuistsnbol را ری اکت بزنید و سپس برگردید و دکمه انجام دادم را کلیک کنید ♥️",
         reaction_keyboard()
     )
 
 
-def send_episode_to_user(chat_id, user_id):
-    episode_key = get_pending(user_id)
+# ============================================================
+# SEND EPISODE
+# ============================================================
 
-    if not episode_key:
+def delete_sent_messages_later(
+    chat_id,
+    message_ids
+):
+    def worker():
+        time.sleep(DELETE_AFTER)
+
+        for message_id in message_ids:
+            try:
+                delete_message(
+                    chat_id,
+                    message_id
+                )
+            except Exception as e:
+                print(
+                    "delete_sent_messages_later error:",
+                    e
+                )
+
+    threading.Thread(
+        target=worker,
+        daemon=True
+    ).start()
+
+
+def send_episode_to_user(chat_id, user_id):
+    pending = get_pending(user_id)
+
+    if not pending:
         send_message(
             chat_id,
-            "لینک قسمت پیدا نشد. دوباره لینک قسمت رو باز کن."
+            "❌ لینک قسمت پیدا نشد."
         )
         return
 
     selected_type = None
-    lookup_key = episode_key
+    episode_key = pending
 
-    if episode_key.startswith("TYPE::"):
-        parts = episode_key.split("::", 2)
+    if pending.startswith("TYPE::"):
+        parts = pending.split("::", 2)
 
         if len(parts) == 3:
-            lookup_key = parts[1]
+            episode_key = parts[1]
             selected_type = parts[2]
 
-    episode = get_episode(lookup_key)
+    episode = get_episode(episode_key)
 
     if not episode:
-        clear_pending(user_id)
-
         send_message(
             chat_id,
-            "این قسمت دیگه موجود نیست."
+            "❌ این قسمت پیدا نشد یا حذف شده."
         )
         return
 
     files = enrich_files(
         episode.get("files") or [],
-        lookup_key
+        episode_key
     )
 
     if selected_type:
@@ -907,11 +851,9 @@ def send_episode_to_user(chat_id, user_id):
     if not files:
         send_message(
             chat_id,
-            "فایل این قسمت پیدا نشد."
+            "❌ فایل موردنظر پیدا نشد."
         )
         return
-
-    clear_pending(user_id)
 
     sent_ids = []
 
@@ -922,102 +864,66 @@ def send_episode_to_user(chat_id, user_id):
         )
 
         if result.get("ok"):
-            sent_message = result.get("result", {})
-            message_id = sent_message.get("message_id")
+            msg = result.get("result") or {}
+            message_id = msg.get("message_id")
 
             if message_id:
                 sent_ids.append(message_id)
 
-    if not sent_ids:
-        send_message(
-            chat_id,
-            "ارسال فایل انجام نشد. چند لحظه بعد دوباره امتحان کن."
-        )
-        return
-
     record_stat(
         user_id,
         "download",
-        lookup_key,
+        episode_key,
         selected_type,
-        len(sent_ids)
+        len(files)
     )
 
-    send_message(
-        chat_id,
-        f"فایل‌ها ارسال شد ✅\n"
-        f"تا {DELETE_AFTER} ثانیه فرصت داری ذخیره‌شون کنی."
-    )
+    clear_pending(user_id)
 
-    threading.Thread(
-        target=delete_sent_messages_later,
-        args=(chat_id, sent_ids),
-        daemon=True
-    ).start()
-
-
-def delete_sent_messages_later(chat_id, message_ids):
-    time.sleep(DELETE_AFTER)
-
-    for message_id in message_ids:
-        delete_message(
+    if sent_ids:
+        delete_sent_messages_later(
             chat_id,
-            message_id
+            sent_ids
         )
-
-    send_message(
-        chat_id,
-        "فایل‌های ارسالی حذف شدند 🗑️\n"
-        "برای دریافت دوباره، لینک قسمت رو دوباره باز کن."
-    )
 
 
 # ============================================================
 # ADMIN FILE HANDLING
 # ============================================================
 
-def extract_file_from_message(message):
-    if message.get("video"):
-        video = message["video"]
-
-        return {
-            "type": "video",
-            "file_id": video.get("file_id"),
-            "caption": message.get("caption", "")
-        }
-
-    if message.get("document"):
-        document = message["document"]
-
-        return {
-            "type": "document",
-            "file_id": document.get("file_id"),
-            "caption": message.get("caption", "")
-        }
-
-    return None
-
-
 def handle_admin_file(message):
-    file_info = extract_file_from_message(message)
+    video = message.get("video")
+    document = message.get("document")
 
-    if not file_info:
+    if not video and not document:
         return False
 
-    caption = file_info.get("caption", "")
+    caption = message.get("caption", "") or ""
+
     parsed = parse_caption(caption)
 
     if not parsed:
         send_message(
             ADMIN_ID,
-            "❌ کپشن فایل قابل تشخیص نیست.\n\n"
-            "نمونه:\n"
-            "🪴 سریال «عشق و تخت»\n"
-            "🪷 قسمت : 2\n"
+            "❌ کپشن قابل شناسایی نیست.\n\n"
+            "فرمت نمونه:\n"
+            "🪴 سریال «نام سریال»\n"
+            "🪷 قسمت : 1\n"
             "🫧 زبان اصلی\n"
             "🎍 کیفیت : 1080"
         )
-        return True
+        return False
+
+    if video:
+        file_id = video.get("file_id")
+        media_type = "video"
+
+    else:
+        file_id = document.get("file_id")
+        media_type = "document"
+
+    if not file_id:
+        return False
 
     is_preview = is_preview_caption(caption)
 
@@ -1030,36 +936,58 @@ def handle_admin_file(message):
         else parsed["episode_key"]
     )
 
-    episode = get_episode(episode_key)
+    file_type = normalize_file_type(caption)
 
-    files = (
-        episode.get("files") or []
-        if episode
-        else []
-    )
+    file_info = {
+        "type": media_type,
+        "file_id": file_id,
+        "caption": caption,
+        "file_type": file_type,
+        "type_code": make_type_code(
+            episode_key,
+            file_type
+        )
+    }
 
-    file_info["file_type"] = normalize_file_type(caption)
+    existing = get_episode(episode_key)
 
-    file_info["type_code"] = make_type_code(
+    files = []
+
+    if existing:
+        files = existing.get("files") or []
+
+    replaced = False
+
+    for index, old_file in enumerate(files):
+        if (
+            old_file.get("file_id") == file_id
+            or (
+                old_file.get("file_type") == file_type
+                and old_file.get("type_code")
+                == file_info["type_code"]
+                and old_file.get("caption") == caption
+            )
+        ):
+            files[index] = file_info
+            replaced = True
+            break
+
+    if not replaced:
+        files.append(file_info)
+
+    result = save_episode(
         episode_key,
-        file_info["file_type"]
+        parsed["series_name"],
+        parsed["episode_number"],
+        files
     )
 
-    files.append(file_info)
-
-    saved = save_episode(
-        episode_key=episode_key,
-        series_name=parsed["series_name"],
-        episode_number=parsed["episode_number"],
-        files=files
-    )
-
-    if saved is None:
+    if not result:
         send_message(
             ADMIN_ID,
-            "❌ ذخیره در Supabase انجام نشد."
+            "❌ ذخیره قسمت انجام نشد."
         )
-        return True
+        return False
 
     bot_username_result = get_me()
 
@@ -1084,7 +1012,10 @@ def handle_admin_file(message):
 
     groups = {}
 
-    for f in enrich_files(files, episode_key):
+    for f in enrich_files(
+        files,
+        episode_key
+    ):
         groups.setdefault(
             f["file_type"],
             f["type_code"]
@@ -1092,11 +1023,7 @@ def handle_admin_file(message):
 
     lines = []
 
-    label = (
-        "پیش‌نمایش"
-        if is_preview
-        else "قسمت"
-    )
+    label = "پیش‌نمایش" if is_preview else "قسمت"
 
     lines.append(
         f"✅ {label} ذخیره شد."
@@ -1166,7 +1093,10 @@ def find_type_target(type_code):
                     )
 
     except Exception as e:
-        print("find_type_target error:", e)
+        print(
+            "find_type_target error:",
+            e
+        )
 
     return None, None
 
@@ -1175,15 +1105,15 @@ def find_type_target(type_code):
 # ADMIN COMMANDS
 # ============================================================
 
-def handle_admin_command(chat_id, user_id, text):
+def handle_admin_command(
+    chat_id,
+    user_id,
+    text
+):
     if user_id != ADMIN_ID:
         return False
 
     text = text.strip()
-
-    # --------------------------------------------------------
-    # START
-    # --------------------------------------------------------
 
     if text == "/start":
         send_message(
@@ -1198,11 +1128,8 @@ def handle_admin_command(chat_id, user_id, text):
             "/add_sponsor @channel | نام کانال | https://t.me/channel\n"
             "/remove_sponsor ID"
         )
-        return True
 
-    # --------------------------------------------------------
-    # SPONSORS
-    # --------------------------------------------------------
+        return True
 
     if text == "/sponsors":
         sponsors = get_sponsors()
@@ -1233,10 +1160,6 @@ def handle_admin_command(chat_id, user_id, text):
 
         return True
 
-    # --------------------------------------------------------
-    # ADD SPONSOR
-    # --------------------------------------------------------
-
     if text.startswith("/add_sponsor"):
         raw = text[
             len("/add_sponsor"):
@@ -1250,7 +1173,7 @@ def handle_admin_command(chat_id, user_id, text):
         if len(parts) != 3:
             send_message(
                 chat_id,
-                "فرمت درست:\n\n"
+                "فرمت درست:\n"
                 "/add_sponsor @channel | نام کانال | https://t.me/channel"
             )
             return True
@@ -1268,6 +1191,7 @@ def handle_admin_command(chat_id, user_id, text):
                 chat_id,
                 "❌ ذخیره اسپانسر انجام نشد."
             )
+
         else:
             send_message(
                 chat_id,
@@ -1276,20 +1200,14 @@ def handle_admin_command(chat_id, user_id, text):
 
         return True
 
-    # --------------------------------------------------------
-    # REMOVE SPONSOR
-    # --------------------------------------------------------
-
     if text.startswith("/remove_sponsor"):
         parts = text.split()
 
-        if (
-            len(parts) != 2
-            or not parts[1].isdigit()
-        ):
+        if len(parts) != 2 or not parts[1].isdigit():
             send_message(
                 chat_id,
-                "فرمت درست:\n/remove_sponsor ID"
+                "فرمت درست:\n"
+                "/remove_sponsor ID"
             )
             return True
 
@@ -1304,6 +1222,7 @@ def handle_admin_command(chat_id, user_id, text):
                 chat_id,
                 "❌ حذف اسپانسر انجام نشد."
             )
+
         else:
             send_message(
                 chat_id,
@@ -1312,44 +1231,18 @@ def handle_admin_command(chat_id, user_id, text):
 
         return True
 
-    # --------------------------------------------------------
-    # STATS
-    # --------------------------------------------------------
-
     if text == "/stats":
         stats = get_stats()
 
-        if stats is None:
-            send_message(
-                chat_id,
-                "❌ دریافت آمار انجام نشد.\n"
-                "جدول bot_stats در Supabase ساخته نشده "
-                "یا دسترسی ندارد."
-            )
-            return True
-
         send_message(
             chat_id,
-            f"📊 آمار ربات ({stats['month']})\n\n"
-            f"👤 کاربران این ماه: "
-            f"{stats['monthly_users']}\n"
-            f"📥 دریافت قسمت این ماه: "
-            f"{stats['monthly_downloads']}\n"
-            f"🎬 فایل‌های ارسال‌شده این ماه: "
-            f"{stats['monthly_files']}\n"
-            f"👁 پیش‌نمایش‌های ثبت‌شده این ماه: "
-            f"{stats['monthly_previews']}\n\n"
-            f"📈 کل دریافت‌ها: "
-            f"{stats['total_downloads']}\n"
-            f"👥 کل کاربران ثبت‌شده: "
-            f"{stats['total_users']}"
+            "📊 آمار ربات\n\n"
+            f"👤 کاربران یکتا: {stats['total_users']}\n"
+            f"📅 کاربران ۳۰ روز اخیر: {stats['month_users']}\n"
+            f"📁 مجموع فایل‌های ارسال‌شده: {stats['total_files']}"
         )
 
         return True
-
-    # --------------------------------------------------------
-    # DELETE PREVIEW
-    # --------------------------------------------------------
 
     if text.startswith("/delete_preview"):
         raw = text[
@@ -1396,19 +1289,13 @@ def handle_admin_command(chat_id, user_id, text):
 
         return True
 
-    # --------------------------------------------------------
-    # EPISODES
-    # --------------------------------------------------------
-
     if text == "/episodes":
         try:
             result = (
                 supabase
                 .table("episodes")
                 .select(
-                    "episode_key,"
-                    "series_name,"
-                    "episode_number"
+                    "episode_key,series_name,episode_number"
                 )
                 .order("series_name")
                 .order("episode_number")
@@ -1416,7 +1303,8 @@ def handle_admin_command(chat_id, user_id, text):
             )
 
             rows = [
-                r for r in (result.data or [])
+                r
+                for r in (result.data or [])
                 if not str(
                     r.get("episode_key", "")
                 ).startswith("preview__")
@@ -1458,10 +1346,6 @@ def handle_admin_command(chat_id, user_id, text):
 
         return True
 
-    # --------------------------------------------------------
-    # DELETE ALL
-    # --------------------------------------------------------
-
     if text == "/delete_all":
         delete_all_episodes()
         clear_all_pending()
@@ -1469,15 +1353,10 @@ def handle_admin_command(chat_id, user_id, text):
         send_message(
             chat_id,
             "✅ اطلاعات قسمت‌ها و لینک‌های ذخیره‌شده پاک شدند.\n\n"
-            "⚠️ فایل‌های اصلی که قبلاً در تلگرام آپلود شده‌اند "
-            "حذف نمی‌شوند."
+            "⚠️ فایل‌های اصلی که قبلاً در تلگرام آپلود شده‌اند حذف نمی‌شوند."
         )
 
         return True
-
-    # --------------------------------------------------------
-    # DELETE EPISODE
-    # --------------------------------------------------------
 
     if text.startswith("/delete_episode"):
         parts = text.split(
@@ -1512,12 +1391,18 @@ def handle_admin_command(chat_id, user_id, text):
 # WEBHOOK
 # ============================================================
 
-@app.route("/", methods=["GET"])
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def home():
     return "Bot is running."
 
 
-@app.route("/health", methods=["GET"])
+@app.route(
+    "/health",
+    methods=["GET"]
+)
 def health():
     return jsonify({
         "ok": True,
@@ -1525,7 +1410,10 @@ def health():
     })
 
 
-@app.route("/webhook", methods=["POST"])
+@app.route(
+    "/webhook",
+    methods=["POST"]
+)
 def webhook():
     update = request.get_json(
         silent=True
@@ -1607,10 +1495,7 @@ def webhook():
             ""
         )
 
-        # ----------------------------------------------------
-        # ADMIN UPLOAD
-        # ----------------------------------------------------
-
+        # Admin uploaded video/document
         if user_id == ADMIN_ID:
 
             if (
@@ -1637,10 +1522,7 @@ def webhook():
                     "ok": True
                 })
 
-        # ----------------------------------------------------
-        # USER START
-        # ----------------------------------------------------
-
+        # User /start deep link
         if text.startswith(
             "/start"
         ):
@@ -1661,8 +1543,7 @@ def webhook():
                     send_message(
                         chat_id,
                         "سلام 👋\n"
-                        "لینک قسمت موردنظرت رو باز کن "
-                        "تا فایل برات ارسال بشه."
+                        "لینک قسمت موردنظرت رو باز کن تا فایل برات ارسال بشه."
                     )
 
                 return jsonify({
@@ -1671,24 +1552,17 @@ def webhook():
 
             episode_key = parts[1].strip()
 
-            # ------------------------------------------------
-            # TYPE LINK
-            # ------------------------------------------------
-
             if episode_key.startswith(
                 "t_"
             ):
-                real_key, file_type = (
-                    find_type_target(
-                        episode_key
-                    )
+                real_key, file_type = find_type_target(
+                    episode_key
                 )
 
                 if not real_key:
                     send_message(
                         chat_id,
-                        "❌ لینک نوع فایل پیدا نشد "
-                        "یا حذف شده."
+                        "❌ لینک نوع فایل پیدا نشد یا حذف شده."
                     )
 
                     return jsonify({
@@ -1712,10 +1586,6 @@ def webhook():
                     "ok": True
                 })
 
-            # ------------------------------------------------
-            # NORMAL / PREVIEW LINK
-            # ------------------------------------------------
-
             episode = get_episode(
                 episode_key
             )
@@ -1723,8 +1593,7 @@ def webhook():
             if not episode:
                 send_message(
                     chat_id,
-                    "❌ این قسمت پیدا نشد "
-                    "یا حذف شده."
+                    "❌ این قسمت پیدا نشد یا حذف شده."
                 )
 
                 return jsonify({
@@ -1754,7 +1623,6 @@ def webhook():
     )
 
     if callback:
-
         callback_id = callback.get(
             "id"
         )
@@ -1779,7 +1647,9 @@ def webhook():
         )
 
         chat = (
-            callback_message.get("chat")
+            callback_message.get(
+                "chat"
+            )
             or {}
         )
 
@@ -1787,16 +1657,11 @@ def webhook():
             "id"
         )
 
-        message_id = (
-            callback_message.get(
-                "message_id"
-            )
+        message_id = callback_message.get(
+            "message_id"
         )
 
-        # ----------------------------------------------------
-        # CHECK JOIN
-        # ----------------------------------------------------
-
+        # Check sponsor/main membership
         if data == "check_join":
 
             answer_callback(
@@ -1824,7 +1689,6 @@ def webhook():
             if not is_main_channel_member(
                 user_id
             ):
-
                 send_message(
                     chat_id,
                     "هنوز عضو کانال اصلی نیستی 👇",
@@ -1840,11 +1704,9 @@ def webhook():
             )
 
             if missing:
-
                 send_message(
                     chat_id,
-                    "هنوز عضویت بعضی کانال‌ها "
-                    "تأیید نشده 👇",
+                    "هنوز عضویت بعضی کانال‌ها تأیید نشده 👇",
                     sponsor_keyboard(
                         missing
                     )
@@ -1869,15 +1731,17 @@ def webhook():
                 "ok": True
             })
 
-        # ----------------------------------------------------
-        # CHECK REACTIONS
-        # ----------------------------------------------------
+        # ====================================================
+        # REACTION BUTTON
+        # ====================================================
+        # این قسمت عمداً هیچ ری‌اکشنی را بررسی نمی‌کند.
+        # با زدن دکمه، مستقیم فایل ارسال می‌شود.
 
         if data == "check_reactions":
 
             answer_callback(
                 callback_id,
-                "در حال بررسی ری‌اکشن‌ها..."
+                "در حال ارسال فایل..."
             )
 
             episode_key = get_pending(
@@ -1885,31 +1749,9 @@ def webhook():
             )
 
             if not episode_key:
-
                 send_message(
                     chat_id,
                     "❌ لینک قسمت پیدا نشد."
-                )
-
-                return jsonify({
-                    "ok": True
-                })
-
-            ok, count = (
-                user_reacted_to_last_posts(
-                    user_id,
-                    5
-                )
-            )
-
-            if not ok:
-
-                send_message(
-                    chat_id,
-                    "هنوز ری‌اکشن ۵ پست آخر "
-                    "کامل نشده ❤️\n"
-                    f"تعداد پست‌هایی که ربات "
-                    f"بررسی می‌کند: {count}"
                 )
 
                 return jsonify({
@@ -1938,50 +1780,7 @@ def webhook():
     # --------------------------------------------------------
     # MESSAGE REACTION
     # --------------------------------------------------------
-
-    reaction = update.get(
-        "message_reaction"
-    )
-
-    if reaction:
-
-        user = (
-            reaction.get("user")
-            or {}
-        )
-
-        user_id = user.get(
-            "id"
-        )
-
-        message_id = reaction.get(
-            "message_id"
-        )
-
-        if user_id and message_id:
-
-            new_reaction = (
-                reaction.get(
-                    "new_reaction"
-                )
-                or []
-            )
-
-            reacted = any(
-                item.get("type") == "emoji"
-                and item.get("emoji") == "❤️"
-                for item in new_reaction
-            )
-
-            save_reaction(
-                user_id,
-                message_id,
-                reacted
-            )
-
-        return jsonify({
-            "ok": True
-        })
+    # در این نسخه هیچ بررسی یا ذخیره‌ای برای ری‌اکشن انجام نمی‌شود.
 
     return jsonify({
         "ok": True
@@ -1993,7 +1792,6 @@ def webhook():
 # ============================================================
 
 def setup_webhook():
-
     render_url = os.getenv(
         "RENDER_EXTERNAL_URL",
         "https://telegram-aeries-bot.onrender.com"
@@ -2035,9 +1833,7 @@ def setup_webhook():
 
 setup_webhook()
 
-
 if __name__ == "__main__":
-
     port = int(
         os.getenv(
             "PORT",
