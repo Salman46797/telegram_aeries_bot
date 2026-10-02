@@ -12,7 +12,6 @@ from requests.adapters import HTTPAdapter
 from flask import Flask, request, jsonify
 from supabase import create_client
 
-
 # ============================================================
 # CONFIG
 # ============================================================
@@ -27,15 +26,8 @@ CHANNEL_ID = "@altiustuistsnbol"
 CHANNEL_URL = "https://t.me/altiustuistsnbol"
 
 DELETE_AFTER = 30
-
-CACHE_SYNC_INTERVAL = int(
-    os.getenv("CACHE_SYNC_INTERVAL", "90")
-)
-
-USER_FLUSH_INTERVAL = int(
-    os.getenv("USER_FLUSH_INTERVAL", "90")
-)
-
+CACHE_SYNC_INTERVAL = int(os.getenv("CACHE_SYNC_INTERVAL", "90"))
+USER_FLUSH_INTERVAL = int(os.getenv("USER_FLUSH_INTERVAL", "90"))
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is missing")
@@ -46,23 +38,17 @@ if not SUPABASE_URL:
 if not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_KEY is missing")
 
-
-supabase = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY
-)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = Flask(__name__)
 
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-
 # ============================================================
-# FAST HTTP / THREAD POOLS
+# FAST IN-MEMORY CACHE
 # ============================================================
 
 HTTP = requests.Session()
-
 HTTP.mount(
     "https://",
     HTTPAdapter(
@@ -72,72 +58,35 @@ HTTP.mount(
     )
 )
 
-FAST_EXECUTOR = ThreadPoolExecutor(
-    max_workers=16
-)
-
-MEDIA_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4
-)
-
-PENDING_WRITE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=1
-)
-
-
-# ============================================================
-# RAM CACHE
-# ============================================================
+FAST_EXECUTOR = ThreadPoolExecutor(max_workers=16)
+MEDIA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+PENDING_WRITE_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 EPISODES = {}
 TYPE_INDEX = {}
 PENDING = {}
 SPONSORS = []
-
-# user_id -> redownload target
-# target:
-# {
-#   "episode_key": "...",
-#   "file_type": "..."
-# }
-REDOWNLOAD_TARGETS = {}
-
 BOT_USERNAME = None
 
 CACHE_LOCK = threading.RLock()
-
 CACHE_READY = False
 
-
-# ============================================================
-# USER STATS CACHE
-# ============================================================
-
+# User statistics cache
 BOT_USERS = {}
-
 DIRTY_USERS = set()
 
 USER_LOCK = threading.RLock()
-
 USER_LAST_LOCAL_TOUCH = {}
-
 USER_LAST_PERSISTED = {}
 
 USERS_TABLE_READY = False
 
-
-# ============================================================
-# DELIVERY LOCK
-# ============================================================
-
 DELIVERY_LOCK = threading.RLock()
-
 DELIVERING_USERS = set()
 
+# Last successful download target for redownload button
+LAST_DELIVERY_TARGET = {}
 
-# ============================================================
-# DATE HELPERS
-# ============================================================
 
 def _parse_dt(value):
     if not value:
@@ -154,28 +103,262 @@ def _parse_dt(value):
             return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(
-            tzinfo=timezone.utc
-        )
+        dt = dt.replace(tzinfo=timezone.utc)
 
     return dt.astimezone(timezone.utc)
+
+
+def _set_episode_cache(row):
+    if not row:
+        return
+
+    key = row.get("episode_key")
+
+    if not key:
+        return
+
+    files = enrich_files(
+        row.get("files") or [],
+        key
+    )
+
+    row = dict(row)
+    row["files"] = files
+
+    EPISODES[key] = row
+
+    for f in files:
+        code = f.get("type_code")
+
+        if code:
+            TYPE_INDEX[code] = (
+                key,
+                f.get("file_type")
+            )
+
+
+def _load_bot_users(rows):
+    local = {}
+
+    for row in rows or []:
+        try:
+            uid = int(row.get("user_id"))
+        except Exception:
+            continue
+
+        first_seen = (
+            _parse_dt(row.get("first_seen"))
+            or datetime.now(timezone.utc)
+        )
+
+        last_seen = (
+            _parse_dt(row.get("last_seen"))
+            or first_seen
+        )
+
+        local[uid] = {
+            "first_seen": first_seen,
+            "last_seen": last_seen
+        }
+
+    return local
+
+
+def sync_cache_from_supabase():
+    global SPONSORS
+    global BOT_USERNAME
+    global CACHE_READY
+    global BOT_USERS
+    global USERS_TABLE_READY
+
+    try:
+        episodes_result = (
+            supabase
+            .table("episodes")
+            .select("*")
+            .execute()
+        )
+
+        sponsors_result = (
+            supabase
+            .table("sponsors")
+            .select("*")
+            .order("id")
+            .execute()
+        )
+
+        local_episodes = {}
+        local_type_index = {}
+
+        for row in episodes_result.data or []:
+            key = row.get("episode_key")
+
+            if not key:
+                continue
+
+            row_copy = dict(row)
+
+            files = enrich_files(
+                row_copy.get("files") or [],
+                key
+            )
+
+            row_copy["files"] = files
+
+            local_episodes[key] = row_copy
+
+            for f in files:
+                code = f.get("type_code")
+
+                if code:
+                    local_type_index[code] = (
+                        key,
+                        f.get("file_type")
+                    )
+
+        try:
+            users_result = (
+                supabase
+                .table("bot_users")
+                .select(
+                    "user_id,first_seen,last_seen"
+                )
+                .execute()
+            )
+
+            local_users = _load_bot_users(
+                users_result.data or []
+            )
+
+            users_table_ready = True
+
+        except Exception as e:
+            local_users = None
+            users_table_ready = False
+
+            print(
+                "bot_users sync unavailable:",
+                e
+            )
+
+        bot_username = BOT_USERNAME
+
+        if not bot_username:
+            me = get_me()
+
+            bot_username = (
+                me.get("result") or {}
+            ).get("username")
+
+        with CACHE_LOCK:
+            EPISODES.clear()
+            EPISODES.update(local_episodes)
+
+            TYPE_INDEX.clear()
+            TYPE_INDEX.update(local_type_index)
+
+            SPONSORS = list(
+                sponsors_result.data or []
+            )
+
+            BOT_USERNAME = bot_username
+
+            CACHE_READY = True
+
+        if local_users is not None:
+            with USER_LOCK:
+
+                for uid, record in local_users.items():
+
+                    current = BOT_USERS.get(uid)
+
+                    if current:
+                        first_seen = min(
+                            current["first_seen"],
+                            record["first_seen"]
+                        )
+
+                        last_seen = max(
+                            current["last_seen"],
+                            record["last_seen"]
+                        )
+
+                        BOT_USERS[uid] = {
+                            "first_seen": first_seen,
+                            "last_seen": last_seen
+                        }
+
+                    else:
+                        BOT_USERS[uid] = record
+
+                USERS_TABLE_READY = users_table_ready
+
+        print(
+            f"CACHE SYNC OK: "
+            f"{len(EPISODES)} episodes / "
+            f"{len(TYPE_INDEX)} type links / "
+            f"{len(SPONSORS)} sponsors / "
+            f"{len(BOT_USERS)} users"
+        )
+
+        return True
+
+    except Exception as e:
+        print(
+            "cache sync error:",
+            e
+        )
+
+        return False
+
+
+def warm_cache():
+    return sync_cache_from_supabase()
+
+
+def cache_sync_loop():
+
+    while True:
+
+        try:
+            time.sleep(
+                max(
+                    30,
+                    CACHE_SYNC_INTERVAL
+                )
+            )
+
+            flush_dirty_users()
+            sync_cache_from_supabase()
+
+        except Exception as e:
+            print(
+                "cache sync loop error:",
+                e
+            )
 
 
 # ============================================================
 # TELEGRAM HELPERS
 # ============================================================
 
-def tg(method, data=None, timeout=30):
+def tg(
+    method,
+    data=None,
+    timeout=30
+):
+
     try:
-        response = HTTP.post(
+        r = HTTP.post(
             f"{TG_API}/{method}",
             json=data or {},
             timeout=(4, timeout)
         )
 
-        return response.json()
+        return r.json()
 
     except Exception as e:
+
         print(
             "Telegram error:",
             method,
@@ -192,6 +375,7 @@ def send_message(
     text,
     reply_markup=None
 ):
+
     data = {
         "chat_id": chat_id,
         "text": text
@@ -210,6 +394,7 @@ def delete_message(
     chat_id,
     message_id
 ):
+
     return tg(
         "deleteMessage",
         {
@@ -225,6 +410,7 @@ def edit_message(
     text,
     reply_markup=None
 ):
+
     data = {
         "chat_id": chat_id,
         "message_id": message_id,
@@ -245,6 +431,7 @@ def answer_callback(
     text=None,
     show_alert=False
 ):
+
     data = {
         "callback_query_id": callback_id,
         "show_alert": show_alert
@@ -263,6 +450,7 @@ def get_chat_member(
     chat_id,
     user_id
 ):
+
     return tg(
         "getChatMember",
         {
@@ -282,9 +470,7 @@ def get_chat(chat_id):
 
 
 def get_me():
-    return tg(
-        "getMe"
-    )
+    return tg("getMe")
 
 
 def send_video(
@@ -292,6 +478,7 @@ def send_video(
     file_id,
     caption=None
 ):
+
     data = {
         "chat_id": chat_id,
         "video": file_id,
@@ -312,6 +499,7 @@ def send_document(
     file_id,
     caption=None
 ):
+
     data = {
         "chat_id": chat_id,
         "document": file_id
@@ -330,6 +518,7 @@ def send_media_file(
     chat_id,
     file_info
 ):
+
     file_type = file_info.get(
         "type",
         "video"
@@ -368,8 +557,10 @@ def send_media_file(
 # ============================================================
 
 def make_series_key(series_name):
+
     series_hash = hashlib.sha1(
-        series_name.strip()
+        series_name
+        .strip()
         .lower()
         .encode("utf-8")
     ).hexdigest()[:10]
@@ -381,6 +572,7 @@ def make_episode_key(
     series_name,
     episode_number
 ):
+
     return (
         "ep_"
         + make_series_key(series_name)
@@ -393,6 +585,7 @@ def make_preview_key(
     series_name,
     episode_number
 ):
+
     return (
         "preview__"
         + make_episode_key(
@@ -403,6 +596,7 @@ def make_preview_key(
 
 
 def is_preview_caption(caption):
+
     return (
         bool(
             re.search(
@@ -423,32 +617,33 @@ def is_preview_caption(caption):
 
 
 def normalize_file_type(caption):
+
     text = (
-        (caption or "")
-        .replace("ي", "ی")
-        .replace("ك", "ک")
+        caption or ""
+    ).replace(
+        "ي",
+        "ی"
+    ).replace(
+        "ك",
+        "ک"
     )
 
     if (
         "زبان اصلی" in text
-        or
-        "زبان‌اصلی" in text
+        or "زبان‌اصلی" in text
     ):
         return "زبان اصلی"
 
     if (
         "زیرنویس فوری" in text
-        or
-        "زیرنویس‌فوری" in text
+        or "زیرنویس‌فوری" in text
     ):
         return "زیرنویس فوری"
 
     if (
         "زیرنویس مووی باز" in text
-        or
-        "زیرنویس‌مووی‌ باز" in text
-        or
-        "زیرنویس مووی‌باز" in text
+        or "زیرنویس‌مووی‌ باز" in text
+        or "زیرنویس مووی‌باز" in text
     ):
         return "زیرنویس مووی باز"
 
@@ -459,7 +654,11 @@ def normalize_file_type(caption):
         if (
             line
             and not line.startswith(
-                ("🪴", "🪷", "🎍")
+                (
+                    "🪴",
+                    "🪷",
+                    "🎍"
+                )
             )
             and "سریال" not in line
             and "قسمت" not in line
@@ -474,6 +673,7 @@ def make_type_code(
     episode_key,
     file_type
 ):
+
     raw = (
         f"{episode_key}|{file_type}"
         .encode("utf-8")
@@ -486,20 +686,33 @@ def make_type_code(
     )
 
 
+def make_episode_code(
+    episode_key
+):
+
+    return (
+        "e_"
+        + hashlib.sha1(
+            str(episode_key)
+            .encode("utf-8")
+        ).hexdigest()[:12]
+    )
+
+
 def enrich_files(
     files,
     episode_key
 ):
+
     out = []
 
     for f in files or []:
 
         item = dict(f)
 
-        file_type = (
+        ftype = (
             item.get("file_type")
-            or
-            normalize_file_type(
+            or normalize_file_type(
                 item.get(
                     "caption",
                     ""
@@ -507,14 +720,13 @@ def enrich_files(
             )
         )
 
-        item["file_type"] = file_type
+        item["file_type"] = ftype
 
         item["type_code"] = (
             item.get("type_code")
-            or
-            make_type_code(
+            or make_type_code(
                 episode_key,
-                file_type
+                ftype
             )
         )
 
@@ -550,8 +762,7 @@ def parse_caption(caption):
 
     if (
         not series_match
-        or
-        not episode_match
+        or not episode_match
     ):
         return None
 
@@ -576,298 +787,7 @@ def parse_caption(caption):
 
 
 # ============================================================
-# CACHE
-# ============================================================
-
-def _set_episode_cache(row):
-
-    if not row:
-        return
-
-    key = row.get(
-        "episode_key"
-    )
-
-    if not key:
-        return
-
-    files = enrich_files(
-        row.get("files") or [],
-        key
-    )
-
-    row = dict(row)
-
-    row["files"] = files
-
-    EPISODES[key] = row
-
-    for f in files:
-
-        code = f.get(
-            "type_code"
-        )
-
-        if code:
-            TYPE_INDEX[code] = (
-                key,
-                f.get("file_type")
-            )
-
-
-def _load_bot_users(rows):
-
-    local = {}
-
-    for row in rows or []:
-
-        try:
-            uid = int(
-                row.get("user_id")
-            )
-
-        except Exception:
-            continue
-
-        first_seen = (
-            _parse_dt(
-                row.get("first_seen")
-            )
-            or
-            datetime.now(timezone.utc)
-        )
-
-        last_seen = (
-            _parse_dt(
-                row.get("last_seen")
-            )
-            or
-            first_seen
-        )
-
-        local[uid] = {
-            "first_seen": first_seen,
-            "last_seen": last_seen
-        }
-
-    return local
-
-
-def sync_cache_from_supabase():
-
-    global SPONSORS
-    global BOT_USERNAME
-    global CACHE_READY
-    global BOT_USERS
-    global USERS_TABLE_READY
-
-    try:
-
-        episodes_result = (
-            supabase
-            .table("episodes")
-            .select("*")
-            .execute()
-        )
-
-        sponsors_result = (
-            supabase
-            .table("sponsors")
-            .select("*")
-            .order("id")
-            .execute()
-        )
-
-        local_episodes = {}
-
-        local_type_index = {}
-
-        for row in (
-            episodes_result.data
-            or []
-        ):
-
-            key = row.get(
-                "episode_key"
-            )
-
-            if not key:
-                continue
-
-            row_copy = dict(row)
-
-            files = enrich_files(
-                row_copy.get("files")
-                or [],
-                key
-            )
-
-            row_copy["files"] = files
-
-            local_episodes[key] = row_copy
-
-            for f in files:
-
-                code = f.get(
-                    "type_code"
-                )
-
-                if code:
-                    local_type_index[code] = (
-                        key,
-                        f.get("file_type")
-                    )
-
-        try:
-
-            users_result = (
-                supabase
-                .table("bot_users")
-                .select(
-                    "user_id,first_seen,last_seen"
-                )
-                .execute()
-            )
-
-            local_users = _load_bot_users(
-                users_result.data
-                or []
-            )
-
-            users_table_ready = True
-
-        except Exception as e:
-
-            local_users = None
-
-            users_table_ready = False
-
-            print(
-                "bot_users sync unavailable "
-                "(run the provided SQL once):",
-                e
-            )
-
-        bot_username = BOT_USERNAME
-
-        if not bot_username:
-
-            me = get_me()
-
-            bot_username = (
-                me.get("result") or {}
-            ).get("username")
-
-        with CACHE_LOCK:
-
-            EPISODES.clear()
-
-            EPISODES.update(
-                local_episodes
-            )
-
-            TYPE_INDEX.clear()
-
-            TYPE_INDEX.update(
-                local_type_index
-            )
-
-            SPONSORS = list(
-                sponsors_result.data
-                or []
-            )
-
-            BOT_USERNAME = bot_username
-
-            CACHE_READY = True
-
-        if local_users is not None:
-
-            with USER_LOCK:
-
-                for uid, record in (
-                    local_users.items()
-                ):
-
-                    current = BOT_USERS.get(
-                        uid
-                    )
-
-                    if current:
-
-                        first_seen = min(
-                            current["first_seen"],
-                            record["first_seen"]
-                        )
-
-                        last_seen = max(
-                            current["last_seen"],
-                            record["last_seen"]
-                        )
-
-                        BOT_USERS[uid] = {
-                            "first_seen": first_seen,
-                            "last_seen": last_seen
-                        }
-
-                    else:
-                        BOT_USERS[uid] = record
-
-                USERS_TABLE_READY = (
-                    users_table_ready
-                )
-
-        print(
-            f"CACHE SYNC OK: "
-            f"{len(EPISODES)} episodes / "
-            f"{len(TYPE_INDEX)} type links / "
-            f"{len(SPONSORS)} sponsors / "
-            f"{len(BOT_USERS)} users"
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "cache sync error:",
-            e
-        )
-
-        return False
-
-
-def warm_cache():
-    return sync_cache_from_supabase()
-
-
-def cache_sync_loop():
-
-    while True:
-
-        try:
-
-            time.sleep(
-                max(
-                    30,
-                    CACHE_SYNC_INTERVAL
-                )
-            )
-
-            flush_dirty_users()
-
-            sync_cache_from_supabase()
-
-        except Exception as e:
-
-            print(
-                "cache sync loop error:",
-                e
-            )
-
-
-# ============================================================
-# EPISODES
+# SUPABASE - EPISODES
 # ============================================================
 
 def get_episode(episode_key):
@@ -1030,7 +950,6 @@ def delete_all_episodes():
         with CACHE_LOCK:
 
             EPISODES.clear()
-
             TYPE_INDEX.clear()
 
         return result
@@ -1046,7 +965,7 @@ def delete_all_episodes():
 
 
 # ============================================================
-# PENDING
+# SUPABASE - PENDING
 # ============================================================
 
 def set_pending(
@@ -1122,9 +1041,8 @@ def get_pending(user_id):
 
         if result.data:
 
-            value = (
-                result.data[0]
-                .get("episode_key")
+            value = result.data[0].get(
+                "episode_key"
             )
 
             if value:
@@ -1223,7 +1141,7 @@ def clear_all_pending():
 
 
 # ============================================================
-# SPONSORS
+# SUPABASE - SPONSORS
 # ============================================================
 
 def get_sponsors():
@@ -1258,7 +1176,6 @@ def add_sponsor(
         if result.data:
 
             with CACHE_LOCK:
-
                 SPONSORS = (
                     list(SPONSORS)
                     + [result.data[0]]
@@ -1301,9 +1218,11 @@ def remove_sponsor(
                 s
                 for s in SPONSORS
                 if int(
-                    s.get("id", -1)
-                )
-                != int(sponsor_id)
+                    s.get(
+                        "id",
+                        -1
+                    )
+                ) != int(sponsor_id)
             ]
 
         return result
@@ -1319,7 +1238,7 @@ def remove_sponsor(
 
 
 # ============================================================
-# CHANNEL POSTS / REACTIONS
+# SUPABASE - CHANNEL POSTS / REACTIONS
 # ============================================================
 
 def save_channel_post(
@@ -1328,7 +1247,7 @@ def save_channel_post(
 
     try:
 
-        (
+        return (
             supabase
             .table("channel_posts")
             .upsert(
@@ -1349,20 +1268,19 @@ def save_channel_post(
             e
         )
 
+        return None
 
-# این توابع حفظ شده‌اند تا اطلاعات قبلی حذف نشود،
-# اما در فرآیند دریافت فایل اصلاً استفاده نمی‌شوند.
 
-def get_last_posts(limit=5):
+def get_last_posts(
+    limit=5
+):
 
     try:
 
         result = (
             supabase
             .table("channel_posts")
-            .select(
-                "message_id,created_at"
-            )
+            .select("message_id,created_at")
             .order(
                 "created_at",
                 desc=True
@@ -1391,30 +1309,22 @@ def save_reaction(
 
     try:
 
-        (
+        return (
             supabase
             .table("reactions")
-            .delete()
-            .eq(
-                "user_id",
-                int(user_id)
-            )
-            .eq(
-                "message_id",
-                int(message_id)
-            )
-            .execute()
-        )
-
-        (
-            supabase
-            .table("reactions")
-            .insert(
+            .upsert(
                 {
-                    "user_id": int(user_id),
-                    "message_id": int(message_id),
-                    "reacted": bool(reacted)
-                }
+                    "user_id": int(
+                        user_id
+                    ),
+                    "message_id": int(
+                        message_id
+                    ),
+                    "reacted": bool(
+                        reacted
+                    )
+                },
+                on_conflict="user_id,message_id"
             )
             .execute()
         )
@@ -1425,6 +1335,8 @@ def save_reaction(
             "save_reaction error:",
             e
         )
+
+        return None
 
 
 def has_reacted(
@@ -1452,8 +1364,9 @@ def has_reacted(
 
         if result.data:
             return bool(
-                result.data[0]
-                .get("reacted")
+                result.data[0].get(
+                    "reacted"
+                )
             )
 
     except Exception as e:
@@ -1467,49 +1380,34 @@ def has_reacted(
 
 
 def user_reacted_to_last_posts(
-    user_id,
-    limit=5
+    user_id
 ):
 
-    posts = get_last_posts(
-        limit
-    )
+    posts = get_last_posts(5)
 
-    if len(posts) < limit:
-        return False, len(posts)
+    if len(posts) < 5:
+        return False
 
     for post in posts:
 
-        message_id = post.get(
-            "message_id"
-        )
-
-        if not message_id:
-            return False, len(posts)
-
         if not has_reacted(
             user_id,
-            message_id
+            post["message_id"]
         ):
-            return False, len(posts)
+            return False
 
-    return True, len(posts)
+    return True
 
 
 # ============================================================
-# USER STATS
+# SUPABASE - USER STATS
 # ============================================================
 
 def touch_user(user_id):
 
-    try:
-        uid = int(user_id)
+    global USERS_TABLE_READY
 
-    except Exception:
-        return
-
-    if uid == ADMIN_ID or uid <= 0:
-        return
+    uid = int(user_id)
 
     now = datetime.now(
         timezone.utc
@@ -1517,9 +1415,7 @@ def touch_user(user_id):
 
     with USER_LOCK:
 
-        current = BOT_USERS.get(
-            uid
-        )
+        current = BOT_USERS.get(uid)
 
         if current is None:
 
@@ -1528,58 +1424,31 @@ def touch_user(user_id):
                 "last_seen": now
             }
 
-            DIRTY_USERS.add(
-                uid
-            )
+        else:
 
-            USER_LAST_LOCAL_TOUCH[
-                uid
-            ] = now.timestamp()
+            current["last_seen"] = now
 
-            return
+        DIRTY_USERS.add(uid)
 
-        current["last_seen"] = now
-
-        USER_LAST_LOCAL_TOUCH[
-            uid
-        ] = now.timestamp()
-
-        last_persisted = (
-            USER_LAST_PERSISTED.get(
-                uid,
-                0.0
-            )
+        USER_LAST_LOCAL_TOUCH[uid] = (
+            time.time()
         )
-
-        if (
-            now.timestamp()
-            - last_persisted
-            >= USER_FLUSH_INTERVAL
-        ):
-            DIRTY_USERS.add(uid)
 
 
 def flush_dirty_users():
 
-    if not USERS_TABLE_READY:
-        return
-
     with USER_LOCK:
 
-        if not DIRTY_USERS:
-            return
+        ids = list(DIRTY_USERS)
 
-        ids = list(
-            DIRTY_USERS
-        )
+        if not ids:
+            return
 
         rows = []
 
         for uid in ids:
 
-            record = BOT_USERS.get(
-                uid
-            )
+            record = BOT_USERS.get(uid)
 
             if not record:
                 continue
@@ -1587,14 +1456,14 @@ def flush_dirty_users():
             rows.append(
                 {
                     "user_id": uid,
-                    "first_seen":
-                        record[
-                            "first_seen"
-                        ].isoformat(),
-                    "last_seen":
-                        record[
-                            "last_seen"
-                        ].isoformat()
+                    "first_seen": (
+                        record["first_seen"]
+                        .isoformat()
+                    ),
+                    "last_seen": (
+                        record["last_seen"]
+                        .isoformat()
+                    )
                 }
             )
 
@@ -1656,22 +1525,18 @@ def get_stats():
     )
 
     with USER_LOCK:
-
         users = list(
             BOT_USERS.values()
         )
 
-    total_users = len(
-        users
-    )
+    total_users = len(users)
 
     active_today = sum(
         1
         for r in users
         if (
             r.get("last_seen")
-            and
-            r["last_seen"].date()
+            and r["last_seen"].date()
             == today
         )
     )
@@ -1681,8 +1546,7 @@ def get_stats():
         for r in users
         if (
             r.get("last_seen")
-            and
-            r["last_seen"]
+            and r["last_seen"]
             >= month_start
         )
     )
@@ -1692,32 +1556,25 @@ def get_stats():
         for r in users
         if (
             r.get("first_seen")
-            and
-            r["first_seen"]
+            and r["first_seen"]
             >= month_start
         )
     )
 
     return {
-        "month":
-            f"{now.year:04d}/{now.month:02d}",
-
-        "total_users":
-            total_users,
-
-        "active_today":
-            active_today,
-
-        "active_month":
-            active_month,
-
-        "new_this_month":
-            new_this_month
+        "month": (
+            f"{now.year:04d}/"
+            f"{now.month:02d}"
+        ),
+        "total_users": total_users,
+        "active_today": active_today,
+        "active_month": active_month,
+        "new_this_month": new_this_month
     }
 
 
 # ============================================================
-# BOT STATS
+# SUPABASE - DOWNLOAD STATS
 # ============================================================
 
 def record_stat(
@@ -1735,7 +1592,9 @@ def record_stat(
             .table("bot_stats")
             .insert(
                 {
-                    "user_id": int(user_id),
+                    "user_id": int(
+                        user_id
+                    ),
                     "event_type": event_type,
                     "episode_key": episode_key,
                     "file_type": file_type,
@@ -1774,76 +1633,42 @@ def member_status(
     if not result.get("ok"):
         return False
 
-    member = (
-        result.get("result")
-        or {}
+    info = result.get(
+        "result",
+        {}
     )
 
-    status = member.get(
+    status = info.get(
         "status",
         ""
     )
 
-    # مهم:
-    # Telegram برای بعضی کاربران عضو کانال status=restricted
-    # می‌دهد و is_member=True است.
-    # این کاربر عضو محسوب می‌شود.
-    if status == "restricted":
-        return bool(
-            member.get(
-                "is_member",
-                False
-            )
-        )
-
-    return status in (
+    if status in (
         "creator",
         "administrator",
         "member"
-    )
+    ):
+        return True
+
+    if (
+        status == "restricted"
+        and info.get(
+            "is_member"
+        ) is True
+    ):
+        return True
+
+    return False
 
 
 def is_main_channel_member(
     user_id
 ):
+
     return member_status(
         CHANNEL_ID,
         user_id
     )
-
-
-def FastExecutor_map(
-    fn,
-    items
-):
-
-    futures = [
-        FAST_EXECUTOR.submit(
-            fn,
-            item
-        )
-        for item in items
-    ]
-
-    out = []
-
-    for future in futures:
-
-        try:
-            out.append(
-                future.result()
-            )
-
-        except Exception as e:
-
-            print(
-                "membership worker error:",
-                e
-            )
-
-            out.append(None)
-
-    return out
 
 
 def check_all_sponsors(
@@ -1861,21 +1686,23 @@ def check_all_sponsors(
             "chat_id"
         )
 
-        if (
-            chat_id
-            and
-            not member_status(
-                chat_id,
-                user_id
+        return (
+            sponsor
+            if (
+                chat_id
+                and not member_status(
+                    chat_id,
+                    user_id
+                )
             )
-        ):
-            return sponsor
+            else None
+        )
 
-        return None
-
-    results = FastExecutor_map(
-        check,
-        sponsors
+    results = list(
+        FastExecutor_map(
+            check,
+            sponsors
+        )
     )
 
     return [
@@ -1883,6 +1710,40 @@ def check_all_sponsors(
         for x in results
         if x
     ]
+
+
+def FastExecutor_map(
+    fn,
+    items
+):
+
+    futures = [
+        FAST_EXECUTOR.submit(
+            fn,
+            item
+        )
+        for item in items
+    ]
+
+    out = []
+
+    for f in futures:
+
+        try:
+            out.append(
+                f.result()
+            )
+
+        except Exception as e:
+
+            print(
+                "membership worker error:",
+                e
+            )
+
+            out.append(None)
+
+    return out
 
 
 def check_membership_fast(
@@ -1896,9 +1757,7 @@ def check_membership_fast(
             CHANNEL_ID,
             None
         )
-    ]
-
-    targets += [
+    ] + [
         (
             s.get("chat_id"),
             s
@@ -1918,23 +1777,16 @@ def check_membership_fast(
 
     results = []
 
-    for future in futures:
+    for f in futures:
 
         try:
-
             results.append(
                 bool(
-                    future.result()
+                    f.result()
                 )
             )
 
-        except Exception as e:
-
-            print(
-                "membership check error:",
-                e
-            )
-
+        except Exception:
             results.append(False)
 
     main_ok = (
@@ -1951,12 +1803,14 @@ def check_membership_fast(
         )
         if (
             not results[i]
-            and
-            targets[i][1]
+            and targets[i][1]
         )
     ]
 
-    return main_ok, missing
+    return (
+        main_ok,
+        missing
+    )
 
 
 # ============================================================
@@ -1973,8 +1827,7 @@ def sponsor_keyboard(
 
         title = (
             sponsor.get("title")
-            or
-            "کانال اسپانسر"
+            or "کانال اسپانسر"
         )
 
         url = sponsor.get(
@@ -2035,22 +1888,6 @@ def main_channel_keyboard():
                         "ورود به کانال 📺",
                     "url":
                         CHANNEL_URL
-                }
-            ]
-        ]
-    }
-
-
-def redownload_keyboard():
-
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text":
-                        "دانلود مجدد ♻️",
-                    "callback_data":
-                        "redownload"
                 }
             ]
         ]
@@ -2124,32 +1961,26 @@ def show_reaction_page(
     send_message(
         chat_id,
 
-        "لطفا جهت دریافت فایل ابتدا 5 پست اخیر کانال @altiustuistsnbol را ری اکت بزنید و سپس برگردید و دکمه انجام دادم را کلیک کنید ♥️",
+        "لطفا جهت دریافت فایل ابتدا 5 پست اخیر کانال "
+        "@altiustuistsnbol را ری اکت بزنید و سپس برگردید "
+        "و دکمه انجام دادم را کلیک کنید ♥️",
 
         reaction_keyboard()
     )
 
 
-# ============================================================
-# DELIVERY
-# ============================================================
-
 def claim_delivery(
     user_id
 ):
 
-    uid = int(
-        user_id
-    )
+    uid = int(user_id)
 
     with DELIVERY_LOCK:
 
         if uid in DELIVERING_USERS:
             return False
 
-        DELIVERING_USERS.add(
-            uid
-        )
+        DELIVERING_USERS.add(uid)
 
         return True
 
@@ -2159,183 +1990,37 @@ def release_delivery(
 ):
 
     with DELIVERY_LOCK:
-
         DELIVERING_USERS.discard(
             int(user_id)
         )
 
 
-def set_redownload_target(
-    user_id,
-    episode_key,
-    file_type=None
+def redownload_keyboard(
+    target
 ):
 
-    REDOWNLOAD_TARGETS[
-        int(user_id)
-    ] = {
-        "episode_key":
-            episode_key,
-        "file_type":
-            file_type
-    }
+    if not target:
+        return None
 
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text":
+                        "دانلود مجدد ♻️",
 
-def get_redownload_target(
-    user_id
-):
-
-    return REDOWNLOAD_TARGETS.get(
-        int(user_id)
-    )
-
-
-def clear_redownload_target(
-    user_id
-):
-
-    REDOWNLOAD_TARGETS.pop(
-        int(user_id),
-        None
-    )
-
-
-def send_episode_files(
-    chat_id,
-    user_id,
-    episode_key,
-    selected_type=None
-):
-
-    episode = get_episode(
-        episode_key
-    )
-
-    if not episode:
-
-        send_message(
-            chat_id,
-            "این قسمت دیگه موجود نیست."
-        )
-
-        return False
-
-    files = enrich_files(
-        episode.get("files")
-        or [],
-        episode_key
-    )
-
-    if selected_type:
-
-        files = [
-            f
-            for f in files
-            if f.get(
-                "file_type"
-            )
-            == selected_type
+                    "url":
+                        (
+                            f"https://t.me/"
+                            f"{BOT_USERNAME}"
+                            f"?start={target}"
+                            if BOT_USERNAME
+                            else CHANNEL_URL
+                        )
+                }
+            ]
         ]
-
-    if not files:
-
-        send_message(
-            chat_id,
-            "فایل این قسمت پیدا نشد."
-        )
-
-        return False
-
-    send_message(
-        chat_id,
-
-        f"⚠️ توجه:\n"
-        f"فایل‌های ارسالی بعد از {DELETE_AFTER} ثانیه حذف می‌شوند.\n"
-        f"قبل از تمام شدن زمان، فایل‌ها را ذخیره کن."
-    )
-
-    futures = [
-        MEDIA_EXECUTOR.submit(
-            send_media_file,
-            chat_id,
-            f
-        )
-        for f in files
-    ]
-
-    sent_ids = []
-
-    for future in futures:
-
-        try:
-
-            result = future.result()
-
-            if result.get("ok"):
-
-                mid = (
-                    result.get(
-                        "result"
-                    )
-                    or {}
-                ).get(
-                    "message_id"
-                )
-
-                if mid:
-                    sent_ids.append(
-                        mid
-                    )
-
-        except Exception as e:
-
-            print(
-                "send file worker error:",
-                e
-            )
-
-    if not sent_ids:
-
-        send_message(
-            chat_id,
-            "ارسال فایل انجام نشد. چند لحظه بعد دوباره امتحان کن."
-        )
-
-        return False
-
-    # برای دانلود مجدد، هدف را قبل از پاک کردن pending نگه می‌داریم.
-    set_redownload_target(
-        user_id,
-        episode_key,
-        selected_type
-    )
-
-    FAST_EXECUTOR.submit(
-        record_stat,
-        user_id,
-        "download",
-        episode_key,
-        selected_type,
-        len(sent_ids)
-    )
-
-    # دکمه دانلود مجدد
-    send_message(
-        chat_id,
-        "✅ فایل‌ها ارسال شدند.",
-        redownload_keyboard()
-    )
-
-    threading.Thread(
-        target=delete_sent_messages_later,
-        args=(
-            chat_id,
-            sent_ids
-        ),
-        daemon=True
-    ).start()
-
-    return True
+    }
 
 
 def send_episode_to_user(
@@ -2356,11 +2041,11 @@ def send_episode_to_user(
 
     try:
 
-        pending = get_pending(
+        episode_key = get_pending(
             user_id
         )
 
-        if not pending:
+        if not episode_key:
 
             send_message(
                 chat_id,
@@ -2370,14 +2055,13 @@ def send_episode_to_user(
             return
 
         selected_type = None
+        lookup_key = episode_key
 
-        lookup_key = pending
-
-        if pending.startswith(
+        if episode_key.startswith(
             "TYPE::"
         ):
 
-            parts = pending.split(
+            parts = episode_key.split(
                 "::",
                 2
             )
@@ -2385,84 +2069,152 @@ def send_episode_to_user(
             if len(parts) == 3:
 
                 lookup_key = parts[1]
-
                 selected_type = parts[2]
 
-        send_episode_files(
-            chat_id,
-            user_id,
-            lookup_key,
-            selected_type
+        episode = get_episode(
+            lookup_key
         )
 
-        # بعد از ارسال، pending پاک می‌شود.
+        if not episode:
+
+            clear_pending(
+                user_id
+            )
+
+            send_message(
+                chat_id,
+                "این قسمت دیگه موجود نیست."
+            )
+
+            return
+
+        files = enrich_files(
+            episode.get(
+                "files"
+            ) or [],
+            lookup_key
+        )
+
+        if selected_type:
+
+            files = [
+                f
+                for f in files
+                if f.get(
+                    "file_type"
+                ) == selected_type
+            ]
+
+        redownload_target = (
+            make_type_code(
+                lookup_key,
+                selected_type
+            )
+            if selected_type
+            else make_episode_code(
+                lookup_key
+            )
+        )
+
+        if not files:
+
+            send_message(
+                chat_id,
+                "فایل این قسمت پیدا نشد."
+            )
+
+            return
+
         clear_pending(
             user_id
         )
 
-    finally:
-
-        release_delivery(
-            user_id
-        )
-
-
-def redownload_episode(
-    chat_id,
-    user_id
-):
-
-    if not claim_delivery(
-        user_id
-    ):
-
-        answer = send_message(
+        send_message(
             chat_id,
-            "⏳ فایل در حال ارسال است..."
+
+            f"⚠️ توجه:\n"
+            f"فایل‌های ارسالی بعد از "
+            f"{DELETE_AFTER} ثانیه حذف می‌شوند.\n"
+            f"قبل از تمام شدن زمان، فایل‌ها را ذخیره کن."
         )
 
-        return
+        futures = [
+            MEDIA_EXECUTOR.submit(
+                send_media_file,
+                chat_id,
+                f
+            )
+            for f in files
+        ]
 
-    try:
+        sent_ids = []
 
-        target = get_redownload_target(
-            user_id
-        )
+        for future in futures:
 
-        if not target:
+            try:
+
+                result = future.result()
+
+                if result.get("ok"):
+
+                    mid = (
+                        result.get(
+                            "result"
+                        ) or {}
+                    ).get(
+                        "message_id"
+                    )
+
+                    if mid:
+                        sent_ids.append(
+                            mid
+                        )
+
+            except Exception as e:
+
+                print(
+                    "send file worker error:",
+                    e
+                )
+
+        if not sent_ids:
 
             send_message(
                 chat_id,
-                "❌ اطلاعات دانلود قبلی پیدا نشد. لینک قسمت رو دوباره باز کن."
+                "ارسال فایل انجام نشد. چند لحظه بعد دوباره امتحان کن."
             )
 
             return
 
-        episode_key = target.get(
-            "episode_key"
-        )
+        LAST_DELIVERY_TARGET[
+            int(user_id)
+        ] = redownload_target
 
-        selected_type = target.get(
-            "file_type"
-        )
-
-        if not episode_key:
-
-            send_message(
-                chat_id,
-                "❌ لینک قسمت پیدا نشد."
-            )
-
-            return
-
-        # برای دانلود مجدد نیازی به عضویت دوباره نیست؛
-        # عضویت قبلاً تأیید شده است.
-        send_episode_files(
-            chat_id,
+        FAST_EXECUTOR.submit(
+            record_stat,
             user_id,
-            episode_key,
-            selected_type
+            "download",
+            lookup_key,
+            selected_type,
+            len(sent_ids)
         )
+
+        send_message(
+            chat_id,
+            "برای دریافت دوباره همین فایل‌ها روی دکمه زیر بزن 👇",
+            redownload_keyboard(
+                redownload_target
+            )
+        )
+
+        threading.Thread(
+            target=delete_sent_messages_later,
+            args=(
+                chat_id,
+                sent_ids
+            ),
+            daemon=True
+        ).start()
 
     finally:
 
@@ -2489,19 +2241,27 @@ def delete_sent_messages_later(
         for mid in message_ids
     ]
 
-    for future in futures:
+    for f in futures:
 
         try:
-            future.result()
+            f.result()
 
         except Exception:
             pass
+
+    target = LAST_DELIVERY_TARGET.get(
+        int(chat_id)
+    )
 
     send_message(
         chat_id,
 
         "فایل‌های ارسالی حذف شدند 🗑️\n"
-        "برای دریافت دوباره، روی دکمه دانلود مجدد بزن یا لینک قسمت رو دوباره باز کن."
+        "برای دریافت دوباره روی دکمه زیر بزن 👇",
+
+        redownload_keyboard(
+            target
+        )
     )
 
 
@@ -2515,9 +2275,7 @@ def extract_file_from_message(
 
     if message.get("video"):
 
-        video = message[
-            "video"
-        ]
+        video = message["video"]
 
         return {
             "type":
@@ -2535,13 +2293,9 @@ def extract_file_from_message(
                 )
         }
 
-    if message.get(
-        "document"
-    ):
+    if message.get("document"):
 
-        document = message[
-            "document"
-        ]
+        document = message["document"]
 
         return {
             "type":
@@ -2601,43 +2355,36 @@ def handle_admin_file(
         caption
     )
 
-    if is_preview:
-
-        episode_key = make_preview_key(
+    episode_key = (
+        make_preview_key(
             parsed["series_name"],
             parsed["episode_number"]
         )
-
-    else:
-
-        episode_key = parsed[
-            "episode_key"
-        ]
+        if is_preview
+        else parsed["episode_key"]
+    )
 
     episode = get_episode(
         episode_key
     )
 
     files = (
-        episode.get("files")
-        or []
+        episode.get("files") or []
         if episode
         else []
     )
 
-    file_info[
-        "file_type"
-    ] = normalize_file_type(
-        caption
+    file_info["file_type"] = (
+        normalize_file_type(
+            caption
+        )
     )
 
-    file_info[
-        "type_code"
-    ] = make_type_code(
-        episode_key,
-        file_info[
-            "file_type"
-        ]
+    file_info["type_code"] = (
+        make_type_code(
+            episode_key,
+            file_info["file_type"]
+        )
     )
 
     files.append(
@@ -2671,8 +2418,9 @@ def handle_admin_file(
         bot_username_result = get_me()
 
         bot_username = (
-            bot_username_result
-            .get("result") or {}
+            bot_username_result.get(
+                "result"
+            ) or {}
         ).get(
             "username",
             ""
@@ -2710,8 +2458,7 @@ def handle_admin_file(
     label = (
         "پیش‌نمایش"
         if is_preview
-        else
-        "قسمت"
+        else "قسمت"
     )
 
     lines.append(
@@ -2721,11 +2468,13 @@ def handle_admin_file(
     lines.append("")
 
     lines.append(
-        f"🪴 سریال: {parsed['series_name']}"
+        f"🪴 سریال: "
+        f"{parsed['series_name']}"
     )
 
     lines.append(
-        f"🪷 قسمت: {parsed['episode_number']}"
+        f"🪷 قسمت: "
+        f"{parsed['episode_number']}"
     )
 
     lines.append("")
@@ -2744,7 +2493,8 @@ def handle_admin_file(
 
     lines.append(
         f"🔗 لینک مستقیم کل {label}: "
-        f"{base_link}?start={episode_key}"
+        f"{base_link}?start="
+        f"{make_episode_code(episode_key)}"
     )
 
     send_message(
@@ -2754,9 +2504,7 @@ def handle_admin_file(
 
     record_stat(
         ADMIN_ID,
-        "preview"
-        if is_preview
-        else "upload",
+        "preview" if is_preview else "upload",
         episode_key,
         None,
         1
@@ -2765,9 +2513,58 @@ def handle_admin_file(
     return True
 
 
-# ============================================================
-# TYPE LINKS
-# ============================================================
+def find_episode_target(
+    episode_code
+):
+
+    with CACHE_LOCK:
+
+        for key, row in EPISODES.items():
+
+            if (
+                make_episode_code(key)
+                == episode_code
+            ):
+                return key
+
+    try:
+
+        result = (
+            supabase
+            .table("episodes")
+            .select("*")
+            .execute()
+        )
+
+        with CACHE_LOCK:
+
+            for row in result.data or []:
+
+                _set_episode_cache(
+                    row
+                )
+
+                key = row.get(
+                    "episode_key"
+                )
+
+                if (
+                    key
+                    and make_episode_code(
+                        key
+                    ) == episode_code
+                ):
+                    return key
+
+    except Exception as e:
+
+        print(
+            "find_episode_target error:",
+            e
+        )
+
+    return None
+
 
 def find_type_target(
     type_code
@@ -2795,10 +2592,7 @@ def find_type_target(
 
         with CACHE_LOCK:
 
-            for row in (
-                result.data
-                or []
-            ):
+            for row in result.data or []:
 
                 _set_episode_cache(
                     row
@@ -2834,17 +2628,12 @@ def handle_admin_command(
 
     text = text.strip()
 
-    # --------------------------------------------------------
-    # START
-    # --------------------------------------------------------
-
     if text == "/start":
 
         send_message(
             chat_id,
 
             "پنل مدیریت ربات فعال است ✅\n\n"
-
             "/sponsors\n"
             "/stats\n"
             "/episodes\n"
@@ -2852,16 +2641,11 @@ def handle_admin_command(
             "/delete_episode KEY\n"
             "/add_sponsor @channel | نام کانال | https://t.me/channel\n"
             "/remove_sponsor ID\n"
-            "/delete_preview اسم سریال | شماره قسمت\n"
             "/sync\n"
             "/cache"
         )
 
         return True
-
-    # --------------------------------------------------------
-    # SPONSORS
-    # --------------------------------------------------------
 
     if text == "/sponsors":
 
@@ -2895,10 +2679,6 @@ def handle_admin_command(
         )
 
         return True
-
-    # --------------------------------------------------------
-    # ADD SPONSOR
-    # --------------------------------------------------------
 
     if text.startswith(
         "/add_sponsor"
@@ -2948,10 +2728,6 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
-    # REMOVE SPONSOR
-    # --------------------------------------------------------
-
     if text.startswith(
         "/remove_sponsor"
     ):
@@ -2960,8 +2736,7 @@ def handle_admin_command(
 
         if (
             len(parts) != 2
-            or
-            not parts[1].isdigit()
+            or not parts[1].isdigit()
         ):
 
             send_message(
@@ -2995,18 +2770,13 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
-    # STATS
-    # --------------------------------------------------------
-
     if text == "/stats":
 
         stats = get_stats()
 
         if (
             not USERS_TABLE_READY
-            and
-            stats["total_users"] == 0
+            and stats["total_users"] == 0
         ):
 
             send_message(
@@ -3039,10 +2809,6 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
-    # SYNC
-    # --------------------------------------------------------
-
     if text == "/sync":
 
         ok = sync_cache_from_supabase()
@@ -3050,17 +2816,15 @@ def handle_admin_command(
         send_message(
             chat_id,
 
-            "✅ کش و اطلاعات ربات به‌روزرسانی شد."
-            if ok
-            else
-            "❌ به‌روزرسانی کش انجام نشد."
+            (
+                "✅ کش و اطلاعات ربات به‌روزرسانی شد."
+                if ok
+                else
+                "❌ به‌روزرسانی کش انجام نشد."
+            )
         )
 
         return True
-
-    # --------------------------------------------------------
-    # CACHE
-    # --------------------------------------------------------
 
     if text == "/cache":
 
@@ -3106,10 +2870,6 @@ def handle_admin_command(
         )
 
         return True
-
-    # --------------------------------------------------------
-    # DELETE PREVIEW
-    # --------------------------------------------------------
 
     if text.startswith(
         "/delete_preview"
@@ -3164,15 +2924,12 @@ def handle_admin_command(
             chat_id,
 
             f"✅ پیش‌نمایش قسمت "
-            f"{parts[1]} از «{parts[0]}» حذف شد.\n\n"
+            f"{parts[1]} از "
+            f"«{parts[0]}» حذف شد.\n\n"
             "قسمت اصلی هیچ تغییری نکرد."
         )
 
         return True
-
-    # --------------------------------------------------------
-    # EPISODES
-    # --------------------------------------------------------
 
     if text == "/episodes":
 
@@ -3251,14 +3008,9 @@ def handle_admin_command(
 
         return True
 
-    # --------------------------------------------------------
-    # DELETE ALL
-    # --------------------------------------------------------
-
     if text == "/delete_all":
 
         delete_all_episodes()
-
         clear_all_pending()
 
         send_message(
@@ -3269,10 +3021,6 @@ def handle_admin_command(
         )
 
         return True
-
-    # --------------------------------------------------------
-    # DELETE EPISODE
-    # --------------------------------------------------------
 
     if text.startswith(
         "/delete_episode"
@@ -3344,12 +3092,9 @@ def health():
 )
 def webhook():
 
-    update = (
-        request.get_json(
-            silent=True
-        )
-        or {}
-    )
+    update = request.get_json(
+        silent=True
+    ) or {}
 
     # ========================================================
     # CHANNEL POST
@@ -3375,10 +3120,12 @@ def webhook():
             and
             chat_username.lower()
             ==
-            CHANNEL_ID.replace(
+            CHANNEL_ID
+            .replace(
                 "@",
                 ""
-            ).lower()
+            )
+            .lower()
         ):
 
             message_id = channel_post.get(
@@ -3433,8 +3180,7 @@ def webhook():
 
         if (
             user_id
-            and
-            user_id != ADMIN_ID
+            and user_id != ADMIN_ID
         ):
 
             touch_user(
@@ -3442,19 +3188,15 @@ def webhook():
             )
 
         # ----------------------------------------------------
-        # ADMIN UPLOAD
+        # ADMIN FILE
         # ----------------------------------------------------
 
         if user_id == ADMIN_ID:
 
             if (
-                message.get(
-                    "video"
-                )
+                message.get("video")
                 or
-                message.get(
-                    "document"
-                )
+                message.get("document")
             ):
 
                 handle_admin_file(
@@ -3495,7 +3237,6 @@ def webhook():
                 maxsplit=1
             )
 
-            # /start بدون لینک
             if len(parts) == 1:
 
                 if user_id == ADMIN_ID:
@@ -3521,19 +3262,19 @@ def webhook():
                     }
                 )
 
-            start_code = parts[1].strip()
+            episode_key = parts[1].strip()
 
             # ------------------------------------------------
             # TYPE LINK
             # ------------------------------------------------
 
-            if start_code.startswith(
+            if episode_key.startswith(
                 "t_"
             ):
 
                 real_key, file_type = (
                     find_type_target(
-                        start_code
+                        episode_key
                     )
                 )
 
@@ -3570,11 +3311,38 @@ def webhook():
                 )
 
             # ------------------------------------------------
-            # NORMAL EPISODE LINK
+            # WHOLE EPISODE SAFE LINK
+            # ------------------------------------------------
+
+            if episode_key.startswith(
+                "e_"
+            ):
+
+                real_key = find_episode_target(
+                    episode_key
+                )
+
+                if not real_key:
+
+                    send_message(
+                        chat_id,
+                        "❌ لینک قسمت پیدا نشد یا حذف شده."
+                    )
+
+                    return jsonify(
+                        {
+                            "ok": True
+                        }
+                    )
+
+                episode_key = real_key
+
+            # ------------------------------------------------
+            # NORMAL EPISODE KEY
             # ------------------------------------------------
 
             episode = get_episode(
-                start_code
+                episode_key
             )
 
             if not episode:
@@ -3592,7 +3360,7 @@ def webhook():
 
             set_pending(
                 user_id,
-                start_code
+                episode_key
             )
 
             show_join_page(
@@ -3645,16 +3413,12 @@ def webhook():
             )
 
         callback_message = (
-            callback.get(
-                "message"
-            )
+            callback.get("message")
             or {}
         )
 
         chat = (
-            callback_message.get(
-                "chat"
-            )
+            callback_message.get("chat")
             or {}
         )
 
@@ -3667,46 +3431,7 @@ def webhook():
         )
 
         # ====================================================
-        # REDOWNLOAD
-        # ====================================================
-
-        if data == "redownload":
-
-            answer_callback(
-                callback_id,
-                "در حال ارسال دوباره فایل..."
-            )
-
-            target = get_redownload_target(
-                user_id
-            )
-
-            if not target:
-
-                send_message(
-                    chat_id,
-                    "❌ اطلاعات دانلود قبلی پیدا نشد. لینک قسمت رو دوباره باز کن."
-                )
-
-                return jsonify(
-                    {
-                        "ok": True
-                    }
-                )
-
-            redownload_episode(
-                chat_id,
-                user_id
-            )
-
-            return jsonify(
-                {
-                    "ok": True
-                }
-            )
-
-        # ====================================================
-        # CHECK JOIN
+        # CHECK MEMBERSHIP
         # ====================================================
 
         if data == "check_join":
@@ -3716,11 +3441,11 @@ def webhook():
                 "در حال بررسی عضویت..."
             )
 
-            pending = get_pending(
+            episode_key = get_pending(
                 user_id
             )
 
-            if not pending:
+            if not episode_key:
 
                 if message_id:
 
@@ -3742,7 +3467,7 @@ def webhook():
                 )
             )
 
-            # Main channel
+            # Main channel not joined
             if not main_ok:
 
                 send_message(
@@ -3759,7 +3484,7 @@ def webhook():
                     }
                 )
 
-            # Sponsor channels
+            # Sponsor channels not joined
             if missing:
 
                 send_message(
@@ -3778,7 +3503,7 @@ def webhook():
                     }
                 )
 
-            # عضویت کامل تأیید شد
+            # Membership confirmed
             if message_id:
 
                 delete_message(
@@ -3801,10 +3526,13 @@ def webhook():
         # REACTION BUTTON
         # ====================================================
 
-        if data == "check_reactions":
+        # IMPORTANT:
+        # This button does NOT check reactions.
+        # It is only a visual confirmation.
+        # No Telegram reaction API is called here.
+        # No reaction is saved or verified.
 
-            # این دکمه فقط تأیید ظاهری است.
-            # هیچ بررسی API یا Supabase برای ری‌اکشن انجام نمی‌شود.
+        if data == "check_reactions":
 
             answer_callback(
                 callback_id,
@@ -3858,7 +3586,7 @@ def webhook():
 
 
 # ============================================================
-# WEBHOOK SETUP
+# SET WEBHOOK
 # ============================================================
 
 def setup_webhook():
@@ -3876,8 +3604,7 @@ def setup_webhook():
     result = tg(
         "setWebhook",
         {
-            "url":
-                webhook_url,
+            "url": webhook_url,
 
             "allowed_updates": [
                 "message",
@@ -3885,8 +3612,7 @@ def setup_webhook():
                 "channel_post"
             ],
 
-            "drop_pending_updates":
-                False
+            "drop_pending_updates": False
         }
     )
 
